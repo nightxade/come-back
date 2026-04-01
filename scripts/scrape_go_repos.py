@@ -18,7 +18,8 @@ from tqdm import tqdm
 # --------------------------------------------------------------------------- #
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DATA_DIR = SCRIPT_DIR / "data"
+PROJECT_DIR = SCRIPT_DIR.parent
+DATA_DIR = PROJECT_DIR / "data"
 REPOS_DIR = DATA_DIR / "repos"
 BINARIES_DIR = DATA_DIR / "binaries"
 METADATA_PATH = DATA_DIR / "metadata.json"
