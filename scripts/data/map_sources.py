@@ -15,32 +15,17 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scripts.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH, safe_name
+
 from tqdm import tqdm
 
 # --------------------------------------------------------------------------- #
 #  Configuration
 # --------------------------------------------------------------------------- #
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
-DATA_DIR = PROJECT_DIR / "data"
-REPOS_DIR = DATA_DIR / "repos"
-BINARIES_DIR = DATA_DIR / "binaries"
-METADATA_PATH = DATA_DIR / "metadata.json"
 SOURCE_MAP_PATH = DATA_DIR / "source_map.json"
 
 BUILD_ENV = {"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
-
-LIST_TIMEOUT = 180  # seconds per go list invocation
-
-
-# --------------------------------------------------------------------------- #
-#  Helpers
-# --------------------------------------------------------------------------- #
-
-def safe_name(full_name: str) -> str:
-    """Convert 'owner/repo' to 'owner__repo' for filesystem use."""
-    return full_name.replace("/", "__")
 
 
 def run(cmd: list[str], timeout: int = 120, cwd: str | None = None) -> subprocess.CompletedProcess:

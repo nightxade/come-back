@@ -8,11 +8,16 @@ data/decomps/<owner__repo>/<variant>/<binary>.c
 """
 
 import argparse
+import atexit
 import json
+import multiprocessing as mp
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+from scripts.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, safe_name
 
 from tqdm import tqdm
 
@@ -20,25 +25,7 @@ from tqdm import tqdm
 #  Configuration
 # --------------------------------------------------------------------------- #
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
-DATA_DIR = PROJECT_DIR / "data"
-METADATA_PATH = DATA_DIR / "metadata.json"
-BINARIES_DIR = DATA_DIR / "binaries"
-DECOMPS_DIR = DATA_DIR / "decomps"
-
 GHIDRA_INSTALL = Path(os.environ.get("GHIDRA_INSTALL_DIR", "/opt/ghidra"))
-
-FUNC_DECOMPILE_TIMEOUT = 30   # seconds per function
-ANALYSIS_TIMEOUT = 300         # seconds per binary
-
-
-# --------------------------------------------------------------------------- #
-#  Helpers
-# --------------------------------------------------------------------------- #
-
-def safe_name(full_name: str) -> str:
-    return full_name.replace("/", "__")
 
 
 def load_metadata() -> dict:
@@ -145,6 +132,59 @@ def collect_binaries(meta: dict, repo_filter: str | None) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+#  Multiprocessing worker (each process gets its own JVM + Ghidra project)
+# --------------------------------------------------------------------------- #
+
+_g_project = None
+_g_tmpdir = None
+
+
+def _worker_init():
+    """Called once per worker process — starts a JVM and opens a Ghidra project."""
+    import pyghidra as _pyghidra
+
+    global _g_project, _g_tmpdir
+
+    _pyghidra.start(install_dir=GHIDRA_INSTALL)
+    _g_tmpdir = tempfile.mkdtemp(prefix="ghidra_worker_")
+    _g_project_cm = _pyghidra.open_project(_g_tmpdir, "decomp", create=True)
+    _g_project = _g_project_cm.__enter__()
+
+    def _cleanup():
+        try:
+            _g_project_cm.__exit__(None, None, None)
+        except Exception:
+            pass
+        shutil.rmtree(_g_tmpdir, ignore_errors=True)
+
+    atexit.register(_cleanup)
+
+
+def _worker_task(entry_ser: dict) -> tuple[str, bool]:
+    """Process a single binary inside a worker process.
+
+    Takes and returns plain serialisable types so it works with spawn.
+    """
+    binary_path = Path(entry_ser["binary_path"])
+    output_path = Path(entry_ser["output_path"])
+    label = f"  {entry_ser['repo']}  {entry_ser['variant']}/{entry_ser['binary']}"
+
+    if not binary_path.exists():
+        return label + " (binary missing)", False
+
+    ok = process_binary(_g_project, binary_path, output_path)
+    return label, ok
+
+
+def _serialise_entries(entries: list[dict]) -> list[dict]:
+    """Convert Path objects to strings so entries survive spawn pickling."""
+    return [
+        {**e, "binary_path": str(e["binary_path"]), "output_path": str(e["output_path"])}
+        for e in entries
+    ]
+
+
+# --------------------------------------------------------------------------- #
 #  Main
 # --------------------------------------------------------------------------- #
 
@@ -158,6 +198,12 @@ def main():
                         help="Only decompile a specific variant (default, debug, stripped)")
     parser.add_argument("--force", action="store_true",
                         help="Re-decompile even if output already exists")
+    parser.add_argument("--max-repos", type=int, default=None,
+                        help="Maximum number of repos to decompile")
+    parser.add_argument("--max-size", type=int, default=None,
+                        help="Skip binaries larger than this size in MB")
+    parser.add_argument("--threads", type=int, default=1,
+                        help="Number of parallel worker processes (default: 1)")
     args = parser.parse_args()
 
     meta = load_metadata()
@@ -172,31 +218,65 @@ def main():
             if not (e["output_path"].exists() and e["output_path"].stat().st_size > 0)
         ]
 
+    if args.max_size:
+        max_bytes = args.max_size * 1_000_000
+        entries = [
+            e for e in entries
+            if e["binary_path"].exists() and e["binary_path"].stat().st_size <= max_bytes
+        ]
+
+    if args.max_repos:
+        seen_repos: dict[str, None] = {}
+        filtered = []
+        for e in entries:
+            if e["repo"] not in seen_repos:
+                if len(seen_repos) >= args.max_repos:
+                    continue
+                seen_repos[e["repo"]] = None
+            filtered.append(e)
+        entries = filtered
+
     if not entries:
         print("Nothing to decompile (all outputs exist or no binaries found).")
         return
 
-    print(f"Decompiling {len(entries)} binaries...")
-
-    import pyghidra
-    pyghidra.start(install_dir=GHIDRA_INSTALL)
+    n_threads = max(1, args.threads)
+    print(f"Decompiling {len(entries)} binaries ({n_threads} worker(s))...")
 
     succeeded = 0
     failed = 0
 
-    with tempfile.TemporaryDirectory(prefix="ghidra_proj_") as tmpdir:
-        with pyghidra.open_project(tmpdir, "decomp", create=True) as project:
-            for entry in tqdm(entries, desc="Decompiling", unit="bin"):
-                binary_path = entry["binary_path"]
-                output_path = entry["output_path"]
+    if n_threads == 1:
+        # Sequential — single JVM, single project, no spawn overhead
+        import pyghidra
+        pyghidra.start(install_dir=GHIDRA_INSTALL)
 
-                if not binary_path.exists():
-                    tqdm.write(f"  SKIP {binary_path} (binary missing)")
-                    failed += 1
-                    continue
+        with tempfile.TemporaryDirectory(prefix="ghidra_proj_") as tmpdir:
+            with pyghidra.open_project(tmpdir, "decomp", create=True) as project:
+                for entry in tqdm(entries, desc="Decompiling", unit="bin"):
+                    binary_path = entry["binary_path"]
+                    output_path = entry["output_path"]
 
-                tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
-                ok = process_binary(project, binary_path, output_path)
+                    if not binary_path.exists():
+                        tqdm.write(f"  SKIP {binary_path} (binary missing)")
+                        failed += 1
+                        continue
+
+                    tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
+                    ok = process_binary(project, binary_path, output_path)
+                    if ok:
+                        succeeded += 1
+                    else:
+                        failed += 1
+    else:
+        # Parallel — spawn separate processes, each with its own JVM
+        ctx = mp.get_context("spawn")
+        ser_entries = _serialise_entries(entries)
+
+        with ctx.Pool(processes=n_threads, initializer=_worker_init) as pool:
+            results = pool.imap_unordered(_worker_task, ser_entries)
+            for label, ok in tqdm(results, total=len(entries), desc="Decompiling", unit="bin"):
+                tqdm.write(label)
                 if ok:
                     succeeded += 1
                 else:

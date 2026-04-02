@@ -11,18 +11,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scripts.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH
+
 from tqdm import tqdm
 
 # --------------------------------------------------------------------------- #
 #  Configuration
 # --------------------------------------------------------------------------- #
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
-DATA_DIR = PROJECT_DIR / "data"
-REPOS_DIR = DATA_DIR / "repos"
-BINARIES_DIR = DATA_DIR / "binaries"
-METADATA_PATH = DATA_DIR / "metadata.json"
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
 

@@ -1,0 +1,20 @@
+[project]
+name = "proj261"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "google-genai>=1.70.0",
+    "normalizer>=0.2.1",
+    "pyghidra>=3.0.2",
+    "tqdm>=4.67.3",
+]
+
+[project.scripts]
+infer = "scripts.eval.infer:main"
+count-tokens = "scripts.util.count_tokens:main"
+decompile = "scripts.data.decompile:main"
+map-sources = "scripts.data.map_sources:main"
+scrape-repos = "scripts.data.scrape_go_repos:main"
