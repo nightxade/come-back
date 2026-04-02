@@ -375,7 +375,7 @@ wheels = [
 [[package]]
 name = "proj261"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "dotenv" },
     { name = "google-genai" },

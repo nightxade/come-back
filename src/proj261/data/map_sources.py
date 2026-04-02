@@ -15,7 +15,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH, safe_name
+from proj261.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH, safe_name
 
 from tqdm import tqdm
 

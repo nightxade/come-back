@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, OUT_DIR, PROJECT_DIR, safe_name
+from proj261.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, OUT_DIR, PROJECT_DIR, safe_name
 
 from dotenv import load_dotenv
 from google import genai
@@ -36,6 +36,45 @@ from tqdm import tqdm
 # --------------------------------------------------------------------------- #
 
 MODES = ("decomp", "binary", "decomp+binary")
+
+RETRY_BASE = 2       # seconds
+RETRY_MULT = 2
+RETRY_CAP = 60       # seconds
+RETRY_MAX = 5
+
+
+# --------------------------------------------------------------------------- #
+#  System prompts
+# --------------------------------------------------------------------------- #
+
+_DECOMP_SYSTEM = (
+    "You are an expert Go reverse engineer. You will be given a decompiled C "
+    "pseudocode file produced by Ghidra from a compiled Go binary. Recover the "
+    "original Go source code for the requested function as accurately as possible. "
+    "Make sure to decompile only user-implemented functions, i.e. no imports or built-ins. "
+    "Output ONLY valid Go code with no explanation."
+)
+
+_BINARY_SYSTEM = (
+    "You are an expert Go reverse engineer. You will be given a compiled Go "
+    "binary. Analyze it and recover the original Go source code for the requested "
+    "function as accurately as possible. Make sure to decompile only user-implemented "
+    "functions, i.e. no imports or built-ins. Output ONLY valid Go code with no explanation."
+)
+
+_DECOMP_BINARY_SYSTEM = (
+    "You are an expert Go reverse engineer. You will be given a compiled Go "
+    "binary AND its Ghidra decompiled C pseudocode. Use both to recover the "
+    "original Go source code for the requested function as accurately as possible. "
+    "Make sure to decompile only user-implemented functions, i.e. no imports or built-ins. "
+    "Output ONLY valid Go code with no explanation."
+)
+
+SYSTEM_PROMPTS = {
+    "decomp": _DECOMP_SYSTEM,
+    "binary": _BINARY_SYSTEM,
+    "decomp+binary": _DECOMP_BINARY_SYSTEM,
+}
 
 
 def sanitize_func_name(name: str) -> str:
@@ -501,9 +540,9 @@ def run_batch_inference(client, entries, args):
             try:
                 client.files.delete(name=jsonl_file.name)
             except: pass
-        for bfile in uploaded_binaries.values():
+        for up in uploaded_files.values():
             try:
-                client.files.delete(name=bfile.name)
+                client.files.delete(name=up.name)
             except: pass
 
     print_summary(list(binary_results.values()))
@@ -589,13 +628,14 @@ def main():
                         help="Parallel threads for synchronous mode or binary uploads (default: 1)")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if output already exists")
-    parser.add_argument("--whole-file", action="store_true",
-                        help="Send entire decompilation at once instead of per-function")
+    parser.add_argument("--per-function", action="store_true",
+                        help="Process per-function instead of the whole file at once")
     parser.add_argument("--model", type=str, default="gemini-2.5-flash-lite",
                         help="Gemini model to use (default: gemini-2.5-flash-lite)")
     parser.add_argument("--no-batch", action="store_true",
                         help="Use synchronous API instead of Batch API")
     args = parser.parse_args()
+    args.whole_file = not args.per_function
 
     # Load API key
     load_dotenv(PROJECT_DIR / ".env")

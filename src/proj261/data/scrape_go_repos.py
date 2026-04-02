@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH
+from proj261.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH
 
 from tqdm import tqdm
 
@@ -56,11 +56,6 @@ def run(cmd: list[str], timeout: int = 120, env: dict | None = None, cwd: str | 
     return subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout, env=merged_env, cwd=cwd,
     )
-
-
-def safe_name(full_name: str) -> str:
-    """Convert 'owner/repo' to 'owner__repo' for filesystem use."""
-    return full_name.replace("/", "__")
 
 
 def load_metadata() -> dict:

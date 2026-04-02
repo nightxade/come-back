@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from scripts.util.paths import PROJECT_DIR
+from proj261.util.paths import PROJECT_DIR
 
 def is_binary(file_path: Path) -> bool:
     """Check if a file is likely binary by looking for null bytes in the first 1KB."""
@@ -55,8 +55,8 @@ def main():
             print(f"File '{args.file}' looks binary. Uploading temporarily to count tokens...")
             # Upload to File API (required for binary token counting)
             uploaded_file = client.files.upload(
-                path=file_path,
-                config=types.UploadFileConfig(display_name=f"token_count_{file_path.name}")
+                file=file_path,
+                config=types.UploadFileConfig(display_name=f"token_count_{file_path.name}", mime_type="text/plain"),
             )
             try:
                 contents = [types.Part.from_uri(

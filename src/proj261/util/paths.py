@@ -1,8 +1,8 @@
 from pathlib import Path
 
 # Base directories
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
-PROJECT_DIR = SCRIPT_DIR.parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  # src/proj261/util -> src/proj261
+PROJECT_DIR = SCRIPT_DIR.parent.parent               # src/proj261 -> root
 
 # Data and output directories
 DATA_DIR = PROJECT_DIR / "data"

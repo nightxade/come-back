@@ -13,8 +13,11 @@ dependencies = [
 ]
 
 [project.scripts]
-infer = "scripts.eval.infer:main"
-count-tokens = "scripts.util.count_tokens:main"
-decompile = "scripts.data.decompile:main"
-map-sources = "scripts.data.map_sources:main"
-scrape-repos = "scripts.data.scrape_go_repos:main"
+infer = "proj261.eval.infer:main"
+count-tokens = "proj261.util.count_tokens:main"
+decompile = "proj261.data.decompile:main"
+map-sources = "proj261.data.map_sources:main"
+scrape-repos = "proj261.data.scrape_go_repos:main"
+
+[tool.uv]
+package = true

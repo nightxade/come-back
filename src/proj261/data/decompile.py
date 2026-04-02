@@ -17,7 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from scripts.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, safe_name
+from proj261.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, safe_name
 
 from tqdm import tqdm
 
