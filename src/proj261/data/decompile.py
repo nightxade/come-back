@@ -28,7 +28,9 @@ from tqdm import tqdm
 
 GHIDRA_INSTALL = Path(os.environ.get("GHIDRA_INSTALL_DIR", "/opt/ghidra"))
 
-MAX_STRING_DISPLAY_LEN = 200  # truncate long packed strings in annotations
+FUNC_DECOMPILE_TIMEOUT = 600   # seconds per function decompilation (10 min)
+ANALYSIS_TIMEOUT = 3600        # seconds for full binary analysis (60 min)
+MAX_STRING_DISPLAY_LEN = 200   # truncate long packed strings in annotations
 
 # Regex to find string-related symbol references in decompiled C code.
 _STRING_SYM_RE = re.compile(r"\b((?:PTR_)?s_[A-Za-z0-9_]+)\b")
