@@ -25,7 +25,8 @@ data/
 ├── source_map.json         # Binary→source file mappings (written by map-sources)
 ├── repos/{owner__repo}/    # Cloned Go repositories
 ├── binaries/{owner__repo}/{variant}/{binary}   # Compiled binaries
-└── decomps/{owner__repo}/{variant}/{binary}.c  # Ghidra decompilation output
+├── decomps/{owner__repo}/{variant}/{binary}.c  # Ghidra decompilation output
+└── decomps_filtered/{owner__repo}/{variant}/{binary}.c  # Filtered (user-only) decomps
 
 out/
 └── {owner__repo}/{variant}/{binary}/
@@ -80,7 +81,45 @@ uv run decompile --force   # re-decompile existing outputs
 | `--threads` | Parallel worker processes (default: 1) |
 | `--force` | Re-decompile even if output exists |
 
-### 4. LLM inference with Gemini
+### 4. Filter decomps to user-only functions
+
+Raw Ghidra decomps include all functions (stdlib, runtime, external deps) and are typically too large for LLM context windows (e.g. 24 MB, ~7000 functions for a single binary). This step extracts the Go module path from each binary via `go version -m` and keeps only functions belonging to the user's module, reducing output by 80--99%.
+
+```bash
+uv run filter-decomps
+uv run filter-decomps --repo ollama/ollama
+uv run filter-decomps --variant default --force
+uv run filter-decomps --max-repos 10
+```
+
+| Flag | Description |
+|------|-------------|
+| `--repo` | Filter to a specific repo |
+| `--variant` | Filter to a build variant |
+| `--max-repos` | Limit number of repos |
+| `--force` | Re-filter even if output exists |
+
+The inference step automatically prefers filtered decomps when available.[^1]
+
+### 5. Validate filtering (optional)
+
+Compares the filter's classification against `source_map.json` ground truth at the package level. With `--deep`, also verifies at the function level by parsing Go source declarations and tracing them through the binary's symbol table into the decomp.
+
+```bash
+uv run validate-filter
+uv run validate-filter --repo hashicorp/terraform --deep
+uv run validate-filter --variant default
+```
+
+| Flag | Description |
+|------|-------------|
+| `--repo` | Validate a specific repo only |
+| `--variant` | Validate a specific variant only |
+| `--deep` | Also validate at the function level (requires `data/repos/`) |
+
+Deep validation distinguishes between filter bugs (function is in the raw decomp but missing from the filtered one) and Ghidra limitations (function is in the binary but Ghidra failed to decompile it).
+
+### 6. LLM inference with Gemini
 
 Sends Ghidra decompilations and/or raw binaries to Gemini to recover Go source code. Uses the Batch API by default for efficiency.
 
@@ -118,3 +157,5 @@ Modes:
 uv run count-tokens data/decomps/ollama__ollama/default/chat.c
 uv run count-tokens data/binaries/ollama__ollama/default/chat --model gemini-2.0-flash-lite
 ```
+
+[^1]: **Stripped binaries.** Filtering currently targets unstripped variants (`default`, `debug`) only. For `stripped` binaries, Ghidra replaces symbol names with addresses (`FUN_XXXXXXXX`), so the module-path filter cannot match them directly. [GoReSym](https://github.com/mandiant/GoReSym) can recover full symbol names and addresses from stripped Go binaries via pclntab parsing, which would allow address-based filtering and renaming. However, Ghidra's decompilation of stripped Go binaries is severely limited — in our testing it recovered only ~55% of functions compared to unstripped builds, and only ~7% of user-defined repo functions appeared in the stripped decomp. The bottleneck is Ghidra's analysis, not symbol recovery.
