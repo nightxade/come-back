@@ -26,7 +26,10 @@ data/
 ├── repos/{owner__repo}/    # Cloned Go repositories
 ├── binaries/{owner__repo}/{variant}/{binary}   # Compiled binaries
 ├── decomps/{owner__repo}/{variant}/{binary}.c  # Ghidra decompilation output
-└── decomps_filtered/{owner__repo}/{variant}/{binary}.c  # Filtered (user-only) decomps
+├── decomps_filtered/{owner__repo}/{variant}/{binary}.c  # Filtered (user-only) decomps
+└── decomps_chunked/{owner__repo}/{variant}/{binary}/    # Token-budgeted chunks
+    ├── chunk_000.c ... chunk_NNN.c
+    └── manifest.json
 
 out/
 └── {owner__repo}/{variant}/{binary}/
@@ -99,9 +102,30 @@ uv run filter-decomps --max-repos 10
 | `--max-repos` | Limit number of repos |
 | `--force` | Re-filter even if output exists |
 
-The inference step automatically prefers filtered decomps when available.[^1]
+The inference step automatically prefers chunked decomps when available, then filtered, then raw.[^1]
 
-### 5. Validate filtering (optional)
+### 5. Chunk decomps by package (optional)
+
+Filtered decomps for large projects may still exceed LLM context windows. This step groups functions by Go package (extracted from fully-qualified function names) and packs them into chunks targeting a configurable token budget (~1M tokens by default). Oversized packages are sub-chunked.
+
+```bash
+uv run chunk-decomps
+uv run chunk-decomps --repo hashicorp/terraform
+uv run chunk-decomps --budget 1000000    # token budget per chunk (default: 1M)
+uv run chunk-decomps --force
+```
+
+| Flag | Description |
+|------|-------------|
+| `--repo` | Filter to a specific repo |
+| `--variant` | Filter to a build variant |
+| `--budget` | Target token budget per chunk (default: 1,000,000) |
+| `--max-repos` | Limit number of repos |
+| `--force` | Re-chunk even if output exists |
+
+The inference step automatically prefers chunked decomps when available.
+
+### 6. Validate filtering (optional)
 
 Compares the filter's classification against `source_map.json` ground truth at the package level. With `--deep`, also verifies at the function level by parsing Go source declarations and tracing them through the binary's symbol table into the decomp.
 
@@ -119,7 +143,7 @@ uv run validate-filter --variant default
 
 Deep validation distinguishes between filter bugs (function is in the raw decomp but missing from the filtered one) and Ghidra limitations (function is in the binary but Ghidra failed to decompile it).
 
-### 6. LLM inference with Gemini
+### 7. LLM inference with Gemini
 
 Sends Ghidra decompilations and/or raw binaries to Gemini to recover Go source code. Uses the Batch API by default for efficiency.
 
@@ -141,7 +165,7 @@ uv run infer --mode decomp --no-batch --threads 4   # synchronous mode
 | `--threads` | Parallel threads for sync mode / binary uploads (default: 1) |
 | `--force` | Re-run even if output exists |
 | `--per-function` | Process per-function instead of whole file |
-| `--model` | Gemini model (default: `gemini-2.5-flash-lite`) |
+| `--model` | Gemini model (default: `gemini-3.1-flash-lite`) |
 | `--no-batch` | Use synchronous API instead of Batch API |
 
 Modes:

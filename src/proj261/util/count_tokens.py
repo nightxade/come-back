@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from proj261.util.paths import PROJECT_DIR
+from proj261.util import PROJECT_DIR, DEFAULT_MODEL
 
 def is_binary(file_path: Path) -> bool:
     """Check if a file is likely binary by looking for null bytes in the first 1KB."""
@@ -33,8 +33,8 @@ def is_binary(file_path: Path) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="Count Gemini tokens for a file.")
     parser.add_argument("file", help="Path to the file (text or binary)")
-    parser.add_argument("--model", default="gemini-2.0-flash-lite", 
-                        help="Gemini model to use for counting (default: gemini-2.0-flash-lite)")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Gemini model to use for counting (default: {DEFAULT_MODEL})")
     args = parser.parse_args()
 
     file_path = Path(args.file)

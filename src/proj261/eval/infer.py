@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from proj261.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, FILTERED_DECOMPS_DIR, OUT_DIR, PROJECT_DIR, safe_name
+from proj261.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, FILTERED_DECOMPS_DIR, CHUNKED_DECOMPS_DIR, OUT_DIR, PROJECT_DIR, DEFAULT_MODEL, safe_name
 
 from dotenv import load_dotenv
 from google import genai
@@ -113,10 +113,39 @@ def split_functions(c_source: str) -> list[tuple[str, str]]:
 
 
 def get_chunks_for_binary_impl(entry, mode, whole_file):
-    """Determine which chunks (functions or whole file) to process for a binary."""
-    decomp_path = Path(entry["decomp_path"])
+    """Determine which chunks (functions or whole file) to process for a binary.
+
+    Priority: chunked decomps > filtered/raw decomp > whole file.
+    When a chunked directory with a manifest.json exists, each chunk file
+    becomes a separate ("chunk_NNN", chunk_source) entry.
+    """
     needs_decomp = mode in ("decomp", "decomp+binary")
 
+    if mode == "binary":
+        # Binary-only: single request, whole binary
+        return [("whole", None)]
+
+    # Check for chunked decomps first
+    chunked_dir = entry.get("chunked_dir")
+    if chunked_dir:
+        chunked_path = Path(chunked_dir)
+        manifest_path = chunked_path / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+                chunks = []
+                for chunk_info in manifest["chunks"]:
+                    chunk_file = chunked_path / chunk_info["file"]
+                    if chunk_file.exists():
+                        chunk_name = chunk_info["file"].replace(".c", "")
+                        chunks.append((chunk_name, chunk_file.read_text()))
+                if chunks:
+                    return chunks
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+    # Fall back to decomp file
+    decomp_path = Path(entry["decomp_path"])
     c_source = None
     if needs_decomp:
         try:
@@ -124,10 +153,7 @@ def get_chunks_for_binary_impl(entry, mode, whole_file):
         except Exception:
             pass
 
-    if mode == "binary":
-        # Binary-only: single request, whole binary
-        return [("whole", None)]
-    elif whole_file:
+    if whole_file:
         return [("whole", c_source)]
     else:
         chunks = split_functions(c_source) if c_source else []
@@ -570,7 +596,8 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
                 continue
             for bin_name in bin_list:
                 binary_path = BINARIES_DIR / sname / variant / bin_name
-                # Prefer filtered decomp; fall back to raw
+                # Priority: chunked > filtered > raw
+                chunked_dir = CHUNKED_DECOMPS_DIR / sname / variant / bin_name
                 filtered_path = FILTERED_DECOMPS_DIR / sname / variant / f"{bin_name}.c"
                 raw_path = DECOMPS_DIR / sname / variant / f"{bin_name}.c"
                 decomp_path = filtered_path if filtered_path.exists() else raw_path
@@ -579,20 +606,27 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
                 if needs_binary and not binary_path.exists():
                     continue
                 if needs_decomp and not decomp_path.exists():
-                    continue
+                    # Still allow if chunked dir exists
+                    if not (chunked_dir / "manifest.json").exists():
+                        continue
 
                 # Size filter
                 if args.max_size and binary_path.exists():
                     if binary_path.stat().st_size > args.max_size * 1_000_000:
                         continue
 
-                entries.append({
+                entry = {
                     "repo": repo_name,
                     "variant": variant,
                     "binary": bin_name,
                     "binary_path": str(binary_path),
                     "decomp_path": str(decomp_path),
-                })
+                }
+                # Include chunked dir if manifest exists
+                if (chunked_dir / "manifest.json").exists():
+                    entry["chunked_dir"] = str(chunked_dir)
+
+                entries.append(entry)
 
     # Limit repos
     if args.max_repos:
@@ -633,8 +667,8 @@ def main():
                         help="Re-run even if output already exists")
     parser.add_argument("--per-function", action="store_true",
                         help="Process per-function instead of the whole file at once")
-    parser.add_argument("--model", type=str, default="gemini-2.5-flash-lite",
-                        help="Gemini model to use (default: gemini-2.5-flash-lite)")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
+                        help=f"Gemini model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--no-batch", action="store_true",
                         help="Use synchronous API instead of Batch API")
     args = parser.parse_args()
