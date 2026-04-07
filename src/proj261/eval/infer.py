@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from proj261.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, OUT_DIR, PROJECT_DIR, safe_name
+from proj261.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, FILTERED_DECOMPS_DIR, OUT_DIR, PROJECT_DIR, safe_name
 
 from dotenv import load_dotenv
 from google import genai
@@ -570,7 +570,10 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
                 continue
             for bin_name in bin_list:
                 binary_path = BINARIES_DIR / sname / variant / bin_name
-                decomp_path = DECOMPS_DIR / sname / variant / f"{bin_name}.c"
+                # Prefer filtered decomp; fall back to raw
+                filtered_path = FILTERED_DECOMPS_DIR / sname / variant / f"{bin_name}.c"
+                raw_path = DECOMPS_DIR / sname / variant / f"{bin_name}.c"
+                decomp_path = filtered_path if filtered_path.exists() else raw_path
 
                 # Check prerequisites
                 if needs_binary and not binary_path.exists():

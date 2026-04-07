@@ -16,6 +16,7 @@ dependencies = [
 infer = "proj261.eval.infer:main"
 count-tokens = "proj261.util.count_tokens:main"
 decompile = "proj261.data.decompile:main"
+filter-decomps = "proj261.data.filter_decomps:main"
 map-sources = "proj261.data.map_sources:main"
 scrape-repos = "proj261.data.scrape_go_repos:main"
 
