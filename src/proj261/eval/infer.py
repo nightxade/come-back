@@ -50,27 +50,24 @@ DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 # --------------------------------------------------------------------------- #
 
 _DECOMP_SYSTEM = (
-    "You are an expert Go reverse engineer. You will be given a decompiled C "
-    "pseudocode file produced by Ghidra from a compiled Go binary. Recover the "
-    "original Go source code for ALL functions in the input as accurately as "
-    "possible. You MUST recover every function — do not stop early or "
-    "summarize. Output ONLY valid Go code with no explanation."
+    "You are an expert Go reverse engineer. You will be given a single "
+    "decompiled C pseudocode function produced by Ghidra from a compiled Go "
+    "binary. Recover the original Go source code for this function as "
+    "accurately as possible. Output ONLY valid Go code with no explanation."
 )
 
 _BINARY_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a compiled Go "
-    "binary. Analyze it and recover the original Go source code for ALL "
-    "functions as accurately as possible. You MUST recover every function — "
-    "do not stop early or summarize. Output ONLY valid Go code with no "
-    "explanation."
+    "binary. Analyze it and recover the original Go source code for the "
+    "requested function as accurately as possible. Output ONLY valid Go code "
+    "with no explanation."
 )
 
 _DECOMP_BINARY_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a compiled Go "
-    "binary AND its Ghidra decompiled C pseudocode. Use both to recover the "
-    "original Go source code for ALL functions in the input as accurately as "
-    "possible. You MUST recover every function — do not stop early or "
-    "summarize. Output ONLY valid Go code with no explanation."
+    "binary AND the Ghidra decompiled C pseudocode for a single function. "
+    "Use both to recover the original Go source code for this function as "
+    "accurately as possible. Output ONLY valid Go code with no explanation."
 )
 
 SYSTEM_PROMPTS = {
@@ -78,15 +75,6 @@ SYSTEM_PROMPTS = {
     "binary": _BINARY_SYSTEM,
     "decomp+binary": _DECOMP_BINARY_SYSTEM,
 }
-
-
-def sanitize_func_name(name: str) -> str:
-    """Turn a Ghidra function name into a safe filename component."""
-    name = name.replace("/", "__")
-    name = re.sub(r"[*()\[\]]", "", name)
-    name = re.sub(r"_+", "_", name)
-    name = name.strip("_")
-    return name or "unnamed"
 
 
 def load_metadata() -> dict:
@@ -101,11 +89,12 @@ def strip_code_fences(text: str) -> str:
 
 
 def get_chunks_for_binary_impl(entry, mode):
-    """Load chunked decomps for a binary.
+    """Load per-function chunked decomps for a binary.
 
-    Returns list of (chunk_name, chunk_source) tuples from the chunked
-    decomps directory.  For binary-only mode, returns a single
-    ("whole", None) entry.
+    Returns list of (output_rel_path, source_text) tuples.  *output_rel_path*
+    mirrors the package/function layout (e.g. ``main/main``,
+    ``github.com__foo__bar/Func``) and is used to construct the output ``.go``
+    path.  For binary-only mode returns a single ("whole", None) entry.
     """
     if mode == "binary":
         return [("whole", None)]
@@ -122,11 +111,12 @@ def get_chunks_for_binary_impl(entry, mode):
     try:
         manifest = json.loads(manifest_path.read_text())
         chunks = []
-        for chunk_info in manifest["chunks"]:
-            chunk_file = chunked_path / chunk_info["file"]
-            if chunk_file.exists():
-                chunk_name = chunk_info["file"].replace(".c", "")
-                chunks.append((chunk_name, chunk_file.read_text()))
+        for func_info in manifest["functions"]:
+            func_file = chunked_path / func_info["file"]
+            if func_file.exists():
+                # Strip the .c extension to get the relative output path
+                rel_path = func_info["file"].removesuffix(".c")
+                chunks.append((rel_path, func_file.read_text()))
         return chunks
     except (json.JSONDecodeError, KeyError):
         return []
@@ -256,13 +246,12 @@ def process_binary(
         # Determine chunks to process
         chunks = get_chunks_for_binary_impl(entry, mode)
 
-        for func_name, code_block in chunks:
-            sanitized = sanitize_func_name(func_name)
-            out_file = out_dir / f"{sanitized}.go"
+        for rel_path, code_block in chunks:
+            out_file = out_dir / f"{rel_path}.go"
 
             # Per-function resumability
             if not force and out_file.exists() and out_file.stat().st_size > 0:
-                result["functions"][func_name] = {"status": "skipped"}
+                result["functions"][rel_path] = {"status": "skipped"}
                 continue
 
             # Check call budget
@@ -281,7 +270,7 @@ def process_binary(
                 call_budget[0] -= 1
 
             if response is None:
-                result["functions"][func_name] = {"status": "error"}
+                result["functions"][rel_path] = {"status": "error"}
                 continue
 
             # Extract text and token counts
@@ -294,8 +283,9 @@ def process_binary(
             result["total_input_tokens"] += in_tok
             result["total_output_tokens"] += out_tok
 
+            out_file.parent.mkdir(parents=True, exist_ok=True)
             out_file.write_text(text)
-            result["functions"][func_name] = {
+            result["functions"][rel_path] = {
                 "status": "ok",
                 "input_tokens": in_tok,
                 "output_tokens": out_tok,
@@ -349,14 +339,13 @@ def run_batch_inference(client, entries, args):
         chunks = get_chunks_for_binary_impl(entry, args.mode)
 
         pending_chunks = []
-        for func_name, code_block in chunks:
-            sanitized = sanitize_func_name(func_name)
-            out_file = out_dir / f"{sanitized}.go"
+        for rel_path, code_block in chunks:
+            out_file = out_dir / f"{rel_path}.go"
 
             if not args.force and out_file.exists() and out_file.stat().st_size > 0:
                 continue
 
-            pending_chunks.append((func_name, code_block))
+            pending_chunks.append((rel_path, code_block))
 
         if pending_chunks:
             all_work.append({
@@ -428,9 +417,9 @@ def run_batch_inference(client, entries, args):
         entry = work["entry"]
         binary_key = f"{entry['repo']}|{entry['variant']}|{entry['binary']}"
 
-        for func_name, code_block in work["chunks"]:
+        for rel_path, code_block in work["chunks"]:
             key = f"k{len(jsonl_lines):06d}"
-            key_map[key] = (binary_key, func_name)
+            key_map[key] = (binary_key, rel_path)
 
             parts = []
             if args.mode in ("binary", "decomp+binary"):
@@ -498,15 +487,13 @@ def run_batch_inference(client, entries, args):
             if not line: continue
             res_obj = json.loads(line)
             key = res_obj["key"]
-            binary_key, func_name = key_map[key]
+            binary_key, rel_path = key_map[key]
 
             res_meta = binary_results[binary_key]
             entry = next(w["entry"] for w in all_work if f"{w['entry']['repo']}|{w['entry']['variant']}|{w['entry']['binary']}" == binary_key)
             out_dir = OUT_DIR / safe_name(entry["repo"]) / entry["variant"] / entry["binary"]
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-            sanitized = sanitize_func_name(func_name)
-            out_file = out_dir / f"{sanitized}.go"
+            out_file = out_dir / f"{rel_path}.go"
+            out_file.parent.mkdir(parents=True, exist_ok=True)
 
             if "response" in res_obj:
                 resp = res_obj["response"]
@@ -524,7 +511,7 @@ def run_batch_inference(client, entries, args):
                     in_tok = usage.get("promptTokenCount", 0)
                     out_tok = usage.get("candidatesTokenCount", 0)
 
-                    res_meta["functions"][func_name] = {
+                    res_meta["functions"][rel_path] = {
                         "status": "ok",
                         "input_tokens": in_tok,
                         "output_tokens": out_tok,
@@ -532,12 +519,12 @@ def run_batch_inference(client, entries, args):
                     res_meta["total_input_tokens"] += in_tok
                     res_meta["total_output_tokens"] += out_tok
                 except Exception as e:
-                    print(f"Error processing {func_name}: {e}")
-                    res_meta["functions"][func_name] = {"status": "error", "error": str(e)}
+                    print(f"Error processing {rel_path}: {e}")
+                    res_meta["functions"][rel_path] = {"status": "error", "error": str(e)}
             else:
                 err = res_obj.get("status", {})
-                print(f"Function {func_name} failed: {err.get('message', 'Unknown error')}")
-                res_meta["functions"][func_name] = {"status": "error", "error": err.get("message")}
+                print(f"Function {rel_path} failed: {err.get('message', 'Unknown error')}")
+                res_meta["functions"][rel_path] = {"status": "error", "error": err.get("message")}
 
         # 7. Finalize and write metadata
         for binary_key, res_meta in binary_results.items():

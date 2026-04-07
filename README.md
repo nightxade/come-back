@@ -27,15 +27,14 @@ data/
 ├── binaries/{owner__repo}/{variant}/{binary}   # Compiled binaries
 ├── decomps/{owner__repo}/{variant}/{binary}.c  # Ghidra decompilation output
 ├── decomps_filtered/{owner__repo}/{variant}/{binary}.c  # Filtered (user-only) decomps
-└── decomps_chunked/{owner__repo}/{variant}/{binary}/    # Token-budgeted chunks
-    ├── chunk_000.c ... chunk_NNN.c
+└── decomps_chunked/{owner__repo}/{variant}/{binary}/    # Per-function decomp files
+    ├── {package}/{function}.c
     └── manifest.json
 
 out/
 └── {owner__repo}/{variant}/{binary}/
     ├── metadata.json       # Inference metadata (mode, model, tokens, per-function status)
-    ├── {func_name}.go      # Per-function recovered Go source
-    └── whole.go            # Whole-file recovered Go source (--whole-file)
+    └── {package}/{function}.go  # Per-function recovered Go source
 ```
 
 Build variants: `default`, `debug` (`-gcflags=-N -l`), `stripped` (`-ldflags=-s -w`).
@@ -104,14 +103,13 @@ uv run filter-decomps --max-repos 10
 
 The inference step automatically prefers chunked decomps when available, then filtered, then raw.[^1]
 
-### 5. Chunk decomps by package (optional)
+### 5. Chunk decomps into per-function files
 
-Filtered decomps for large projects may still exceed LLM context windows. This step groups functions by Go package (extracted from fully-qualified function names) and packs them into chunks targeting a configurable token budget (~1M tokens by default). Oversized packages are sub-chunked.
+Splits each filtered decomp into one file per function, organized into package subdirectories that mirror the Go source layout (the module path prefix is stripped using `go version -m`). Each function's decompiled C pseudocode gets its own `.c` file, enabling per-function LLM inference. Go generic instantiation shapes (e.g. `Func[go.shape.struct_{...}]`) are simplified to a short type tag in the filename (e.g. `Func_struct.c`); duplicates from multiple instantiations of the same kind get numeric suffixes.
 
 ```bash
 uv run chunk-decomps
 uv run chunk-decomps --repo hashicorp/terraform
-uv run chunk-decomps --budget 1000000    # token budget per chunk (default: 1M)
 uv run chunk-decomps --force
 ```
 
@@ -119,7 +117,6 @@ uv run chunk-decomps --force
 |------|-------------|
 | `--repo` | Filter to a specific repo |
 | `--variant` | Filter to a build variant |
-| `--budget` | Target token budget per chunk (default: 1,000,000) |
 | `--max-repos` | Limit number of repos |
 | `--force` | Re-chunk even if output exists |
 
