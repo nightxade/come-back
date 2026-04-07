@@ -151,7 +151,7 @@ Sends Ghidra decompilations and/or raw binaries to Gemini to recover Go source c
 uv run infer --mode decomp --repo ollama/ollama
 uv run infer --mode decomp+binary --max-repos 5
 uv run infer --mode binary --variant default
-uv run infer --mode decomp --per-function
+uv run infer --mode decomp --max-calls 100
 uv run infer --mode decomp --no-batch --threads 4   # synchronous mode
 ```
 
@@ -162,9 +162,9 @@ uv run infer --mode decomp --no-batch --threads 4   # synchronous mode
 | `--variant` | Filter to a build variant |
 | `--max-repos` | Limit number of repos |
 | `--max-size` | Skip binaries larger than N MB |
+| `--max-calls` | Limit total number of LLM inference calls |
 | `--threads` | Parallel threads for sync mode / binary uploads (default: 1) |
 | `--force` | Re-run even if output exists |
-| `--per-function` | Process per-function instead of whole file |
 | `--model` | Gemini model (default: `gemini-3.1-flash-lite`) |
 | `--no-batch` | Use synchronous API instead of Batch API |
 

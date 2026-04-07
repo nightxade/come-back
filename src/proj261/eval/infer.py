@@ -3,8 +3,8 @@
 
 Reads data/metadata.json to discover binaries, then for each one:
   - Optionally uploads the raw binary via the Gemini Files API
-  - Splits the Ghidra .c decompilation by // Function: markers
-  - Sends each chunk (or whole file) to Gemini with a mode-appropriate prompt
+  - Loads chunked decomps from data/decomps_chunked/
+  - Sends each chunk to Gemini with a mode-appropriate prompt
   - Writes recovered Go source to out/<owner__repo>/<variant>/<binary>/
 
 Modes:
@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from proj261.util import DATA_DIR, METADATA_PATH, BINARIES_DIR, DECOMPS_DIR, FILTERED_DECOMPS_DIR, CHUNKED_DECOMPS_DIR, OUT_DIR, PROJECT_DIR, DEFAULT_MODEL, safe_name
+from proj261.util import METADATA_PATH, BINARIES_DIR, CHUNKED_DECOMPS_DIR, OUT_DIR, PROJECT_DIR, DEFAULT_MODEL, safe_name
 
 from dotenv import load_dotenv
 from google import genai
@@ -42,6 +42,8 @@ RETRY_MULT = 2
 RETRY_CAP = 60       # seconds
 RETRY_MAX = 5
 
+DEFAULT_MAX_OUTPUT_TOKENS = 65_536
+
 
 # --------------------------------------------------------------------------- #
 #  System prompts
@@ -50,24 +52,25 @@ RETRY_MAX = 5
 _DECOMP_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a decompiled C "
     "pseudocode file produced by Ghidra from a compiled Go binary. Recover the "
-    "original Go source code for the requested function as accurately as possible. "
-    "Make sure to decompile only user-implemented functions, i.e. no imports or built-ins. "
-    "Output ONLY valid Go code with no explanation."
+    "original Go source code for ALL functions in the input as accurately as "
+    "possible. You MUST recover every function — do not stop early or "
+    "summarize. Output ONLY valid Go code with no explanation."
 )
 
 _BINARY_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a compiled Go "
-    "binary. Analyze it and recover the original Go source code for the requested "
-    "function as accurately as possible. Make sure to decompile only user-implemented "
-    "functions, i.e. no imports or built-ins. Output ONLY valid Go code with no explanation."
+    "binary. Analyze it and recover the original Go source code for ALL "
+    "functions as accurately as possible. You MUST recover every function — "
+    "do not stop early or summarize. Output ONLY valid Go code with no "
+    "explanation."
 )
 
 _DECOMP_BINARY_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a compiled Go "
     "binary AND its Ghidra decompiled C pseudocode. Use both to recover the "
-    "original Go source code for the requested function as accurately as possible. "
-    "Make sure to decompile only user-implemented functions, i.e. no imports or built-ins. "
-    "Output ONLY valid Go code with no explanation."
+    "original Go source code for ALL functions in the input as accurately as "
+    "possible. You MUST recover every function — do not stop early or "
+    "summarize. Output ONLY valid Go code with no explanation."
 )
 
 SYSTEM_PROMPTS = {
@@ -97,70 +100,36 @@ def strip_code_fences(text: str) -> str:
     return text
 
 
-def split_functions(c_source: str) -> list[tuple[str, str]]:
-    """Split a Ghidra .c file on // Function: markers.
+def get_chunks_for_binary_impl(entry, mode):
+    """Load chunked decomps for a binary.
 
-    Returns list of (function_name, code_block) tuples.
+    Returns list of (chunk_name, chunk_source) tuples from the chunked
+    decomps directory.  For binary-only mode, returns a single
+    ("whole", None) entry.
     """
-    parts = re.split(r"^// Function: (.+)$", c_source, flags=re.MULTILINE)
-    # parts = [preamble, name1, code1, name2, code2, ...]
-    functions = []
-    for i in range(1, len(parts) - 1, 2):
-        name = parts[i].strip()
-        code = parts[i + 1]
-        functions.append((name, f"// Function: {name}\n{code}"))
-    return functions
-
-
-def get_chunks_for_binary_impl(entry, mode, whole_file):
-    """Determine which chunks (functions or whole file) to process for a binary.
-
-    Priority: chunked decomps > filtered/raw decomp > whole file.
-    When a chunked directory with a manifest.json exists, each chunk file
-    becomes a separate ("chunk_NNN", chunk_source) entry.
-    """
-    needs_decomp = mode in ("decomp", "decomp+binary")
-
     if mode == "binary":
-        # Binary-only: single request, whole binary
         return [("whole", None)]
 
-    # Check for chunked decomps first
     chunked_dir = entry.get("chunked_dir")
-    if chunked_dir:
-        chunked_path = Path(chunked_dir)
-        manifest_path = chunked_path / "manifest.json"
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text())
-                chunks = []
-                for chunk_info in manifest["chunks"]:
-                    chunk_file = chunked_path / chunk_info["file"]
-                    if chunk_file.exists():
-                        chunk_name = chunk_info["file"].replace(".c", "")
-                        chunks.append((chunk_name, chunk_file.read_text()))
-                if chunks:
-                    return chunks
-            except (json.JSONDecodeError, KeyError):
-                pass
+    if not chunked_dir:
+        return []
 
-    # Fall back to decomp file
-    decomp_path = Path(entry["decomp_path"])
-    c_source = None
-    if needs_decomp:
-        try:
-            c_source = decomp_path.read_text()
-        except Exception:
-            pass
+    chunked_path = Path(chunked_dir)
+    manifest_path = chunked_path / "manifest.json"
+    if not manifest_path.exists():
+        return []
 
-    if whole_file:
-        return [("whole", c_source)]
-    else:
-        chunks = split_functions(c_source) if c_source else []
-        if not chunks:
-            # No function markers found — fall back to whole file
-            chunks = [("whole", c_source)]
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        chunks = []
+        for chunk_info in manifest["chunks"]:
+            chunk_file = chunked_path / chunk_info["file"]
+            if chunk_file.exists():
+                chunk_name = chunk_info["file"].replace(".c", "")
+                chunks.append((chunk_name, chunk_file.read_text()))
         return chunks
+    except (json.JSONDecodeError, KeyError):
+        return []
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +141,7 @@ def call_gemini(
     model: str,
     system_prompt: str,
     contents: list,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> types.GenerateContentResponse | None:
     """Call Gemini with exponential backoff on retryable errors."""
     delay = RETRY_BASE
@@ -182,6 +152,7 @@ def call_gemini(
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
+                    max_output_tokens=max_output_tokens,
                 ),
             )
             return response
@@ -213,10 +184,16 @@ def process_binary(
     entry: dict,
     mode: str,
     model: str,
-    whole_file: bool,
     force: bool,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    call_budget: list[int] | None = None,
 ) -> dict:
-    """Process a single binary: upload, infer per-function or whole, write output.
+    """Process a single binary: upload, infer chunks, write output.
+
+    Args:
+        max_output_tokens: Maximum tokens in each generated response.
+        call_budget: If provided, a single-element list [remaining_calls].
+            Decremented on each API call; stops early when it reaches 0.
 
     Returns a result dict for the summary metadata.
     """
@@ -261,9 +238,10 @@ def process_binary(
     if needs_binary:
         try:
             uploaded_file = client.files.upload(
-                path=binary_path,
+                file=binary_path,
                 config=types.UploadFileConfig(
                     display_name=f"{sname}/{variant}/{binary}",
+                    mime_type="text/plain",
                 ),
             )
         except Exception as e:
@@ -276,7 +254,7 @@ def process_binary(
 
     try:
         # Determine chunks to process
-        chunks = get_chunks_for_binary_impl(entry, mode, whole_file)
+        chunks = get_chunks_for_binary_impl(entry, mode)
 
         for func_name, code_block in chunks:
             sanitized = sanitize_func_name(func_name)
@@ -287,19 +265,20 @@ def process_binary(
                 result["functions"][func_name] = {"status": "skipped"}
                 continue
 
+            # Check call budget
+            if call_budget is not None and call_budget[0] <= 0:
+                break
+
             # Build content parts
             contents = []
             if uploaded_file is not None:
-                contents.append(
-                    types.Part.from_uri(
-                        file_uri=uploaded_file.uri,
-                        mime_type=uploaded_file.mime_type,
-                    )
-                )
+                contents.append(uploaded_file)
             if code_block is not None:
                 contents.append(code_block)
 
-            response = call_gemini(client, model, system_prompt, contents)
+            response = call_gemini(client, model, system_prompt, contents, max_output_tokens)
+            if call_budget is not None:
+                call_budget[0] -= 1
 
             if response is None:
                 result["functions"][func_name] = {"status": "error"}
@@ -367,7 +346,7 @@ def run_batch_inference(client, entries, args):
                 pass
 
         # Determine chunks
-        chunks = get_chunks_for_binary_impl(entry, args.mode, args.whole_file)
+        chunks = get_chunks_for_binary_impl(entry, args.mode)
 
         pending_chunks = []
         for func_name, code_block in chunks:
@@ -403,6 +382,22 @@ def run_batch_inference(client, entries, args):
     if not all_work:
         print("Nothing to process (all outputs exist or no matching binaries found).")
         return
+
+    # Apply --max-calls limit
+    if args.max_calls is not None:
+        remaining = args.max_calls
+        trimmed_work = []
+        for w in all_work:
+            if remaining <= 0:
+                break
+            if len(w["chunks"]) <= remaining:
+                trimmed_work.append(w)
+                remaining -= len(w["chunks"])
+            else:
+                w["chunks"] = w["chunks"][:remaining]
+                trimmed_work.append(w)
+                remaining = 0
+        all_work = trimmed_work
 
     total_chunks = sum(len(w["chunks"]) for w in all_work)
     print(f"Found {len(all_work)} binaries with {total_chunks} functions/chunks to process.")
@@ -596,19 +591,13 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
                 continue
             for bin_name in bin_list:
                 binary_path = BINARIES_DIR / sname / variant / bin_name
-                # Priority: chunked > filtered > raw
                 chunked_dir = CHUNKED_DECOMPS_DIR / sname / variant / bin_name
-                filtered_path = FILTERED_DECOMPS_DIR / sname / variant / f"{bin_name}.c"
-                raw_path = DECOMPS_DIR / sname / variant / f"{bin_name}.c"
-                decomp_path = filtered_path if filtered_path.exists() else raw_path
 
                 # Check prerequisites
                 if needs_binary and not binary_path.exists():
                     continue
-                if needs_decomp and not decomp_path.exists():
-                    # Still allow if chunked dir exists
-                    if not (chunked_dir / "manifest.json").exists():
-                        continue
+                if needs_decomp and not (chunked_dir / "manifest.json").exists():
+                    continue
 
                 # Size filter
                 if args.max_size and binary_path.exists():
@@ -620,11 +609,8 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
                     "variant": variant,
                     "binary": bin_name,
                     "binary_path": str(binary_path),
-                    "decomp_path": str(decomp_path),
+                    "chunked_dir": str(chunked_dir),
                 }
-                # Include chunked dir if manifest exists
-                if (chunked_dir / "manifest.json").exists():
-                    entry["chunked_dir"] = str(chunked_dir)
 
                 entries.append(entry)
 
@@ -665,14 +651,15 @@ def main():
                         help="Parallel threads for synchronous mode or binary uploads (default: 1)")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if output already exists")
-    parser.add_argument("--per-function", action="store_true",
-                        help="Process per-function instead of the whole file at once")
+    parser.add_argument("--max-calls", type=int, default=None,
+                        help="Limit total number of LLM inference calls")
+    parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS,
+                        help=f"Max output tokens per response (default: {DEFAULT_MAX_OUTPUT_TOKENS:,})")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
                         help=f"Gemini model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--no-batch", action="store_true",
                         help="Use synchronous API instead of Batch API")
     args = parser.parse_args()
-    args.whole_file = not args.per_function
 
     # Load API key
     load_dotenv(PROJECT_DIR / ".env")
@@ -712,16 +699,21 @@ def main():
         return
 
     n_threads = max(1, args.threads)
+    call_budget = [args.max_calls] if args.max_calls is not None else None
+
     print(f"Processing {len(entries)} binaries with model={args.model}, "
           f"mode={args.mode}, threads={n_threads} (SYNC MODE)")
 
     results = []
 
     def _do_one(entry):
-        return process_binary(client, entry, args.mode, args.model, args.whole_file, args.force)
+        return process_binary(client, entry, args.mode, args.model, args.force,
+                              args.max_output_tokens, call_budget)
 
     if n_threads == 1:
         for entry in tqdm(entries, desc="Inferring", unit="bin"):
+            if call_budget is not None and call_budget[0] <= 0:
+                break
             tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
             results.append(_do_one(entry))
     else:
