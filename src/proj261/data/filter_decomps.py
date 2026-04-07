@@ -48,8 +48,21 @@ def get_module_path(binary_path: Path) -> str | None:
     return None
 
 
+def is_user_func(name: str, module_path: str) -> bool:
+    """Check if a function name belongs to the user's module.
+
+    Enforces a path boundary (/ or .) after the module path to avoid
+    matching external deps that share a name prefix, e.g.
+    github.com/hashicorp/terraform-plugin-log would NOT match
+    module github.com/hashicorp/terraform.
+    """
+    if name.startswith("main."):
+        return True
+    return name.startswith(module_path + "/") or name.startswith(module_path + ".")
+
+
 def filter_decomp(c_source: str, module_path: str) -> tuple[str, int, int]:
-    """Keep only functions whose name starts with module_path or 'main.'.
+    """Keep only functions whose name belongs to module_path or 'main.'.
 
     Returns (filtered_source, kept_count, total_count).
     """
@@ -61,7 +74,7 @@ def filter_decomp(c_source: str, module_path: str) -> tuple[str, int, int]:
     for i in range(1, len(parts) - 1, 2):
         total += 1
         name = parts[i].strip()
-        if name.startswith(module_path) or name.startswith("main."):
+        if is_user_func(name, module_path):
             kept.append(f"// Function: {name}\n{parts[i + 1]}")
 
     return "".join(kept), len(kept), total
