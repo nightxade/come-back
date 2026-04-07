@@ -158,7 +158,7 @@ uv run infer --mode decomp --no-batch --threads 4   # synchronous mode
 | `--repo` | Filter to a specific repo |
 | `--variant` | Filter to a build variant |
 | `--max-repos` | Limit number of repos |
-| `--max-size` | Skip binaries larger than N MB |
+| `--max-binaries` | Limit total number of binaries to process |
 | `--max-calls` | Limit total number of LLM inference calls |
 | `--threads` | Parallel threads for sync mode / binary uploads (default: 1) |
 | `--force` | Re-run even if output exists |

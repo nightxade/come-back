@@ -586,11 +586,6 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
                 if needs_decomp and not (chunked_dir / "manifest.json").exists():
                     continue
 
-                # Size filter
-                if args.max_size and binary_path.exists():
-                    if binary_path.stat().st_size > args.max_size * 1_000_000:
-                        continue
-
                 entry = {
                     "repo": repo_name,
                     "variant": variant,
@@ -613,6 +608,10 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
             filtered.append(e)
         entries = filtered
 
+    # Limit total binaries
+    if args.max_binaries:
+        entries = entries[:args.max_binaries]
+
     return entries
 
 
@@ -632,8 +631,8 @@ def main():
                         help="Filter to a specific variant (default, debug, stripped)")
     parser.add_argument("--max-repos", type=int, default=None,
                         help="Limit number of repos to process")
-    parser.add_argument("--max-size", type=int, default=None,
-                        help="Skip binaries larger than N MB")
+    parser.add_argument("--max-binaries", type=int, default=None,
+                        help="Limit total number of binaries to process")
     parser.add_argument("--threads", type=int, default=1,
                         help="Parallel threads for synchronous mode or binary uploads (default: 1)")
     parser.add_argument("--force", action="store_true",

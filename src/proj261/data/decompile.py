@@ -12,6 +12,7 @@ import atexit
 import json
 import multiprocessing as mp
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -27,9 +28,106 @@ from tqdm import tqdm
 
 GHIDRA_INSTALL = Path(os.environ.get("GHIDRA_INSTALL_DIR", "/opt/ghidra"))
 
+MAX_STRING_DISPLAY_LEN = 200  # truncate long packed strings in annotations
+
+# Regex to find string-related symbol references in decompiled C code.
+_STRING_SYM_RE = re.compile(r"\b((?:PTR_)?s_[A-Za-z0-9_]+)\b")
+
 
 def load_metadata() -> dict:
     return json.loads(METADATA_PATH.read_text())
+
+
+# --------------------------------------------------------------------------- #
+#  String data collection
+# --------------------------------------------------------------------------- #
+
+def _read_string_at(mem, addr, max_len=MAX_STRING_DISPLAY_LEN):
+    """Read a run of printable ASCII from program memory at *addr*.
+
+    Go stores string literals as packed byte runs in .rodata; this reads
+    from a given address until it hits a non-printable byte or *max_len*.
+    """
+    chars = []
+    try:
+        for i in range(max_len):
+            b = mem.getByte(addr.add(i)) & 0xFF
+            if b < 0x20 or b > 0x7E:
+                break
+            chars.append(chr(b))
+    except Exception:
+        pass
+    return "".join(chars) if chars else None
+
+
+def collect_string_data(program):
+    """Build ``{symbol_name: string_value}`` for all string data in *program*.
+
+    Collects two kinds of items from Ghidra's listing:
+
+    * Direct string data (``s_*`` symbols) — the value is read directly.
+    * Pointer-to-string data (``PTR_s_*`` symbols) — the pointer target
+      is followed to retrieve the string.  If the pointer lands in the
+      middle of a packed string block (common in Go binaries), the bytes
+      are read directly from memory.
+    """
+    from ghidra.program.model.data import AbstractStringDataType
+
+    listing = program.getListing()
+    sym_table = program.getSymbolTable()
+    mem = program.getMemory()
+
+    # Pass 1: collect direct string data items, keyed by address string.
+    addr_to_str: dict[str, str] = {}
+    result: dict[str, str] = {}
+    ptrs: list[tuple[str, object]] = []  # (symbol_name, target Address)
+
+    data_iter = listing.getDefinedData(True)
+    while data_iter.hasNext():
+        data = data_iter.next()
+        addr = data.getAddress()
+        sym = sym_table.getPrimarySymbol(addr)
+        if sym is None:
+            continue
+        name = sym.getName()
+        dt = data.getDataType()
+
+        if isinstance(dt, AbstractStringDataType):
+            try:
+                val = data.getValue()
+                if val is not None:
+                    s = str(val)[:MAX_STRING_DISPLAY_LEN]
+                    addr_to_str[str(addr)] = s
+                    result[name] = s
+            except Exception:
+                pass
+        elif data.isPointer() and name.startswith("PTR_"):
+            try:
+                target = data.getValue()  # returns an Address
+                if target is not None:
+                    ptrs.append((name, target))
+            except Exception:
+                pass
+
+    # Pass 2: resolve pointers to their target strings.
+    for name, target_addr in ptrs:
+        target_key = str(target_addr)
+        if target_key in addr_to_str:
+            result[name] = addr_to_str[target_key]
+        else:
+            # Pointer may land in the middle of a packed string block —
+            # read directly from memory.
+            s = _read_string_at(mem, target_addr)
+            if s:
+                result[name] = s
+
+    return result
+
+
+def _find_referenced_strings(c_code, string_data):
+    """Return ``{name: value}`` for string symbols referenced in *c_code*."""
+    refs = set(_STRING_SYM_RE.findall(c_code))
+    return {name: string_data[name] for name in refs if name in string_data}
 
 
 # --------------------------------------------------------------------------- #
@@ -40,12 +138,19 @@ def decompile_program(program, output_path: Path) -> bool:
     """Decompile all functions in an already-analyzed program.
 
     Uses DecompInterface directly — no script runner overhead.
+    Each function is annotated with a ``// Strings:`` comment block
+    listing the resolved values of any ``PTR_s_*`` / ``s_*`` symbols
+    referenced in its decompiled C code.
+
     Returns True on success.
     """
     import pyghidra
     from ghidra.app.decompiler import DecompInterface
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Collect resolved string data before decompiling.
+    string_data = collect_string_data(program)
 
     decompiler = DecompInterface()
     decompiler.openProgram(program)
@@ -62,8 +167,24 @@ def decompile_program(program, output_path: Path) -> bool:
                 if decomp is not None:
                     c_code = decomp.getC()
                     if c_code:
+                        c_str = str(c_code)
                         f.write(f"// Function: {func.getName()}\n")
-                        f.write(str(c_code))
+
+                        # Annotate with resolved string values
+                        referenced = _find_referenced_strings(c_str, string_data)
+                        if referenced:
+                            f.write("// Strings:\n")
+                            for sname in sorted(referenced):
+                                val = referenced[sname]
+                                escaped = (val
+                                    .replace("\\", "\\\\")
+                                    .replace('"', '\\"')
+                                    .replace("\n", "\\n")
+                                    .replace("\r", "\\r")
+                                    .replace("\t", "\\t"))
+                                f.write(f'//   {sname} = "{escaped}"\n')
+
+                        f.write(c_str)
                         f.write("\n")
     finally:
         decompiler.dispose()
