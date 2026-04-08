@@ -35,6 +35,10 @@ MAX_STRING_DISPLAY_LEN = 200   # truncate long packed strings in annotations
 # Regex to find string-related symbol references in decompiled C code.
 _STRING_SYM_RE = re.compile(r"\b((?:PTR_)?s_[A-Za-z0-9_]+)\b")
 
+# Regex to extract the trailing hex address from a Ghidra auto-generated label.
+# e.g. PTR_s_systemStringFormat__bytestringAc_007e0ce0 -> 007e0ce0
+_HEX_ADDR_SUFFIX_RE = re.compile(r"_([0-9a-fA-F]{6,16})$")
+
 
 def load_metadata() -> dict:
     return json.loads(METADATA_PATH.read_text())
@@ -43,6 +47,15 @@ def load_metadata() -> dict:
 # --------------------------------------------------------------------------- #
 #  String data collection
 # --------------------------------------------------------------------------- #
+
+def _read_le64(mem, addr):
+    """Read an 8-byte little-endian integer from program memory."""
+    val = 0
+    for i in range(8):
+        b = mem.getByte(addr.add(i)) & 0xFF
+        val |= b << (i * 8)
+    return val
+
 
 def _read_string_at(mem, addr, max_len=MAX_STRING_DISPLAY_LEN):
     """Read a run of printable ASCII from program memory at *addr*.
@@ -60,6 +73,34 @@ def _read_string_at(mem, addr, max_len=MAX_STRING_DISPLAY_LEN):
     except Exception:
         pass
     return "".join(chars) if chars else None
+
+
+def _read_string_with_len(mem, addr, length):
+    """Read exactly *length* bytes from memory; return string if all printable.
+
+    Unlike :func:`_read_string_at` which reads until a non-printable byte,
+    this uses the Go string length to properly delimit the value — essential
+    for packed string blocks where multiple strings are contiguous.
+    """
+    chars = []
+    try:
+        for i in range(length):
+            b = mem.getByte(addr.add(i)) & 0xFF
+            if b >= 0x20 and b <= 0x7E:
+                chars.append(chr(b))
+            elif b in (0x09, 0x0A, 0x0D):  # tab, newline, carriage return
+                chars.append(chr(b))
+            else:
+                return None
+    except Exception:
+        return None
+    return "".join(chars) if chars else None
+
+
+# Maximum number of Go string (ptr, len) pairs to scan at a PTR_s_* address.
+_MAX_STRING_ARRAY_ENTRIES = 64
+# Stop scanning after this many consecutive non-string pairs.
+_MAX_CONSECUTIVE_FAILS = 8
 
 
 def collect_string_data(program):
@@ -126,10 +167,154 @@ def collect_string_data(program):
     return result
 
 
+def _resolve_from_addr(mem, addr_factory, name, addr):
+    """Try to resolve a single symbol to string value(s) given its memory address.
+
+    For ``PTR_s_*`` symbols, first attempts to read a sequence of Go string
+    ``(ptr, len)`` pairs starting at *addr*.  Each pair is 16 bytes: an
+    8-byte pointer to the string data followed by an 8-byte length.  When
+    multiple valid strings are found the result is a ``list[str]``.  If the
+    pair reading finds only one string, a plain ``str`` is returned.  If pair
+    reading fails entirely, falls back to following the single pointer and
+    reading until a non-printable byte.
+
+    For direct ``s_*`` symbols, reads the string directly at *addr*.
+
+    Returns ``str``, ``list[str]``, or ``None``.
+    """
+    try:
+        if name.startswith("PTR_"):
+            addr_space = addr_factory.getDefaultAddressSpace()
+
+            # Try reading as an array of Go string (ptr, len) pairs.
+            # Go struct arrays interleave strings with other fields
+            # (nil slice headers, integers, etc.), so we skip zero entries
+            # and tolerate a few consecutive non-string entries before
+            # giving up.
+            strings = []
+            consecutive_fails = 0
+            for i in range(_MAX_STRING_ARRAY_ENTRIES):
+                if consecutive_fails > _MAX_CONSECUTIVE_FAILS:
+                    break
+
+                pair_addr = addr.add(i * 16)
+                try:
+                    ptr_val = _read_le64(mem, pair_addr)
+                    str_len = _read_le64(mem, pair_addr.add(8))
+                except Exception:
+                    break
+
+                # Skip zero-initialized fields (nil slices, nil pointers)
+                if ptr_val == 0:
+                    continue
+
+                # Try to read a Go string from this (ptr, len) pair
+                s = None
+                if 0 < str_len <= MAX_STRING_DISPLAY_LEN:
+                    try:
+                        target = addr_space.getAddress(ptr_val)
+                        if mem.contains(target):
+                            s = _read_string_with_len(mem, target, str_len)
+                    except Exception:
+                        pass
+
+                if s is not None:
+                    consecutive_fails = 0
+                    strings.append(s)
+                else:
+                    consecutive_fails += 1
+
+            if len(strings) > 1:
+                return strings
+            if len(strings) == 1:
+                return strings[0]
+
+            # Fallback: follow single pointer, read until non-printable.
+            ptr_val = _read_le64(mem, addr)
+            target = addr_space.getAddress(ptr_val)
+            if mem.contains(target):
+                return _read_string_at(mem, target)
+            return None
+        else:
+            return _read_string_at(mem, addr)
+    except Exception:
+        return None
+
+
+def _resolve_missing_strings(program, c_code, string_data, attempted):
+    """Resolve unresolved ``PTR_s_*``/``s_*`` symbols referenced in *c_code*.
+
+    Ghidra auto-generates labels like ``PTR_s_foo_007e0ce0`` where the
+    trailing hex digits are the memory address of the data item.  These
+    labels often don't appear in the symbol table as formal global
+    symbols, so a symbol-table lookup alone misses them.
+
+    Resolution strategy (tried in order for each symbol):
+
+    1. **Address-from-name** — parse the trailing hex suffix from the
+       symbol name (e.g. ``_007e0ce0`` → ``0x007e0ce0``), construct an
+       Address, and read directly from memory.
+    2. **Symbol table lookup** — fall back to ``getGlobalSymbols(name)``
+       for symbols that don't have a hex suffix or whose suffix doesn't
+       yield a valid address.
+
+    *string_data* is updated in-place; *attempted* tracks symbols that
+    have already been looked up (whether successfully or not) so we
+    don't repeat work across functions.
+    """
+    refs = set(_STRING_SYM_RE.findall(c_code))
+    missing = refs - set(string_data.keys()) - attempted
+
+    if not missing:
+        return
+
+    mem = program.getMemory()
+    addr_factory = program.getAddressFactory()
+    addr_space = addr_factory.getDefaultAddressSpace()
+    sym_table = program.getSymbolTable()
+
+    for name in missing:
+        attempted.add(name)
+
+        # Strategy 1: parse hex address from the symbol name suffix.
+        m = _HEX_ADDR_SUFFIX_RE.search(name)
+        if m:
+            try:
+                addr = addr_space.getAddress(int(m.group(1), 16))
+                if mem.contains(addr):
+                    s = _resolve_from_addr(mem, addr_factory, name, addr)
+                    if s:
+                        string_data[name] = s
+                        continue
+            except Exception:
+                pass
+
+        # Strategy 2: symbol table lookup.
+        syms = list(sym_table.getGlobalSymbols(name))
+        if not syms:
+            continue
+        addr = syms[0].getAddress()
+        if not addr.isMemoryAddress():
+            continue
+        s = _resolve_from_addr(mem, addr_factory, name, addr)
+        if s:
+            string_data[name] = s
+
+
 def _find_referenced_strings(c_code, string_data):
     """Return ``{name: value}`` for string symbols referenced in *c_code*."""
     refs = set(_STRING_SYM_RE.findall(c_code))
     return {name: string_data[name] for name in refs if name in string_data}
+
+
+def _escape_annotation(s: str) -> str:
+    """Escape a string value for use in a ``// Strings:`` annotation."""
+    return (s
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t"))
 
 
 # --------------------------------------------------------------------------- #
@@ -153,6 +338,7 @@ def decompile_program(program, output_path: Path) -> bool:
 
     # Collect resolved string data before decompiling.
     string_data = collect_string_data(program)
+    resolve_attempted: set[str] = set()
 
     decompiler = DecompInterface()
     decompiler.openProgram(program)
@@ -172,19 +358,24 @@ def decompile_program(program, output_path: Path) -> bool:
                         c_str = str(c_code)
                         f.write(f"// Function: {func.getName()}\n")
 
+                        # Resolve any symbols the data-item pass missed
+                        _resolve_missing_strings(
+                            program, c_str, string_data, resolve_attempted,
+                        )
+
                         # Annotate with resolved string values
                         referenced = _find_referenced_strings(c_str, string_data)
                         if referenced:
                             f.write("// Strings:\n")
                             for sname in sorted(referenced):
                                 val = referenced[sname]
-                                escaped = (val
-                                    .replace("\\", "\\\\")
-                                    .replace('"', '\\"')
-                                    .replace("\n", "\\n")
-                                    .replace("\r", "\\r")
-                                    .replace("\t", "\\t"))
-                                f.write(f'//   {sname} = "{escaped}"\n')
+                                if isinstance(val, list):
+                                    parts = []
+                                    for s in val:
+                                        parts.append('"' + _escape_annotation(s) + '"')
+                                    f.write(f'//   {sname} = [{", ".join(parts)}]\n')
+                                else:
+                                    f.write(f'//   {sname} = "{_escape_annotation(val)}"\n')
 
                         f.write(c_str)
                         f.write("\n")
