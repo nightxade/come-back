@@ -459,10 +459,14 @@ def _worker_init(ghidra_install_dir):
 
     global _g_project, _g_tmpdir
 
+    pid = os.getpid()
+    tqdm.write(f"    [worker {pid}] Starting JVM...")
     _pyghidra.start(install_dir=Path(ghidra_install_dir))
+    tqdm.write(f"    [worker {pid}] JVM started, opening Ghidra project...")
     _g_tmpdir = tempfile.mkdtemp(prefix="ghidra_worker_")
     _g_project_cm = _pyghidra.open_project(_g_tmpdir, "decomp", create=True)
     _g_project = _g_project_cm.__enter__()
+    tqdm.write(f"    [worker {pid}] Ready.")
 
     def _cleanup():
         try:
@@ -486,6 +490,7 @@ def _worker_task(entry_ser: dict) -> tuple[str, bool]:
     if not binary_path.exists():
         return label + " (binary missing)", False
 
+    tqdm.write(label)
     ok = process_binary(_g_project, binary_path, output_path)
     return label, ok
 
