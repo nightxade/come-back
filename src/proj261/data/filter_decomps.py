@@ -84,7 +84,7 @@ def collect_entries(meta: dict, args) -> list[dict]:
     """Build a flat list of binaries that have decomps to filter."""
     entries = []
     for repo_name, info in meta["repos"].items():
-        if args.repo and repo_name != args.repo:
+        if args.repo and repo_name not in args.repo:
             continue
         if not info.get("cloned") or not info.get("compiled_at"):
             continue
@@ -116,8 +116,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Filter Ghidra decomps to keep only user-implemented functions.",
     )
-    parser.add_argument("--repo", type=str, default=None,
-                        help="Filter to a specific repo (e.g. ollama/ollama)")
+    parser.add_argument("--repo", type=str, nargs="*", default=None,
+                        help="Filter to specific repo(s) (e.g. ollama/ollama)")
     parser.add_argument("--variant", type=str, default=None,
                         help="Filter to a specific variant (default, debug, stripped)")
     parser.add_argument("--force", action="store_true",

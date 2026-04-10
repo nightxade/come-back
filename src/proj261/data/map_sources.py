@@ -274,7 +274,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Map compiled Go binaries to their source files.",
     )
-    parser.add_argument("--repo", type=str, default=None, help="Map a specific repo only (e.g. ollama/ollama)")
+    parser.add_argument("--repo", type=str, nargs="*", default=None, help="Map specific repo(s) only (e.g. ollama/ollama)")
     args = parser.parse_args()
 
     meta = load_metadata()
@@ -283,10 +283,13 @@ def main():
     goroot = get_goroot()
 
     if args.repo:
-        repos_to_process = {args.repo: meta["repos"].get(args.repo)}
-        if repos_to_process[args.repo] is None:
-            print(f"Error: repo '{args.repo}' not found in metadata.json", file=sys.stderr)
-            sys.exit(1)
+        repos_to_process = {}
+        for r in args.repo:
+            info = meta["repos"].get(r)
+            if info is None:
+                print(f"Error: repo '{r}' not found in metadata.json", file=sys.stderr)
+                sys.exit(1)
+            repos_to_process[r] = info
     else:
         repos_to_process = {
             name: info for name, info in meta["repos"].items()

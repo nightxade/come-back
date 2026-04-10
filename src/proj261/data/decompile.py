@@ -421,11 +421,11 @@ def process_binary(project, binary_path: Path, output_path: Path) -> bool:
         return False
 
 
-def collect_binaries(meta: dict, repo_filter: str | None) -> list[dict]:
+def collect_binaries(meta: dict, repo_filter: list[str] | None) -> list[dict]:
     """Build a flat list of binaries to decompile from metadata."""
     entries = []
     for repo_name, info in meta["repos"].items():
-        if repo_filter and repo_name != repo_filter:
+        if repo_filter and repo_name not in repo_filter:
             continue
         if not info.get("cloned") or not info.get("compiled_at"):
             continue
@@ -506,8 +506,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Decompile compiled Go binaries using Ghidra headless.",
     )
-    parser.add_argument("--repo", type=str, default=None,
-                        help="Decompile binaries for a specific repo only (e.g. ollama/ollama)")
+    parser.add_argument("--repo", type=str, nargs="*", default=None,
+                        help="Decompile binaries for specific repo(s) only (e.g. ollama/ollama)")
     parser.add_argument("--variant", type=str, default=None,
                         help="Only decompile a specific variant (default, debug, stripped)")
     parser.add_argument("--force", action="store_true",

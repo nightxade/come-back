@@ -567,7 +567,7 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
     needs_binary = mode in ("binary", "decomp+binary")
 
     for repo_name, info in meta["repos"].items():
-        if args.repo and repo_name != args.repo:
+        if args.repo and repo_name not in args.repo:
             continue
         if not info.get("cloned") or not info.get("compiled_at"):
             continue
@@ -625,8 +625,8 @@ def main():
     )
     parser.add_argument("--mode", required=True, choices=MODES,
                         help="What to send: decomp, binary, or decomp+binary")
-    parser.add_argument("--repo", type=str, default=None,
-                        help="Filter to a specific repo (e.g. ollama/ollama)")
+    parser.add_argument("--repo", type=str, nargs="*", default=None,
+                        help="Filter to specific repo(s) (e.g. ollama/ollama)")
     parser.add_argument("--variant", type=str, default=None,
                         help="Filter to a specific variant (default, debug, stripped)")
     parser.add_argument("--max-repos", type=int, default=None,

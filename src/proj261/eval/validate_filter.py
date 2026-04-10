@@ -117,7 +117,7 @@ def collect_entries(meta: dict, source_map: dict, args) -> list[dict]:
 
     entries = []
     for repo_name, info in meta["repos"].items():
-        if args.repo and repo_name != args.repo:
+        if args.repo and repo_name not in args.repo:
             continue
         if not info.get("cloned") or not info.get("compiled_at"):
             continue
@@ -382,8 +382,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Validate filtered decomps against source_map.json ground truth.",
     )
-    parser.add_argument("--repo", type=str, default=None,
-                        help="Validate a specific repo only")
+    parser.add_argument("--repo", type=str, nargs="*", default=None,
+                        help="Validate specific repo(s) only")
     parser.add_argument("--variant", type=str, default=None,
                         help="Validate a specific variant only")
     parser.add_argument("--deep", action="store_true",
