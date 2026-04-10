@@ -518,7 +518,13 @@ def main():
                         help="Skip binaries larger than this size in MB")
     parser.add_argument("--threads", type=int, default=1,
                         help="Number of parallel worker processes (default: 1)")
+    parser.add_argument("--ghidra-dir", type=str, default=None,
+                        help="Path to Ghidra installation (overrides GHIDRA_INSTALL_DIR env var)")
     args = parser.parse_args()
+
+    if args.ghidra_dir:
+        global GHIDRA_INSTALL
+        GHIDRA_INSTALL = Path(args.ghidra_dir)
 
     meta = load_metadata()
     entries = collect_binaries(meta, args.repo)
