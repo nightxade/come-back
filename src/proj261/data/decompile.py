@@ -453,13 +453,13 @@ _g_project = None
 _g_tmpdir = None
 
 
-def _worker_init():
+def _worker_init(ghidra_install_dir):
     """Called once per worker process — starts a JVM and opens a Ghidra project."""
     import pyghidra as _pyghidra
 
     global _g_project, _g_tmpdir
 
-    _pyghidra.start(install_dir=GHIDRA_INSTALL)
+    _pyghidra.start(install_dir=Path(ghidra_install_dir))
     _g_tmpdir = tempfile.mkdtemp(prefix="ghidra_worker_")
     _g_project_cm = _pyghidra.open_project(_g_tmpdir, "decomp", create=True)
     _g_project = _g_project_cm.__enter__()
@@ -593,7 +593,7 @@ def main():
         ctx = mp.get_context("spawn")
         ser_entries = _serialise_entries(entries)
 
-        with ctx.Pool(processes=n_threads, initializer=_worker_init) as pool:
+        with ctx.Pool(processes=n_threads, initializer=_worker_init, initargs=(str(GHIDRA_INSTALL),)) as pool:
             results = pool.imap_unordered(_worker_task, ser_entries)
             for label, ok in tqdm(results, total=len(entries), desc="Decompiling", unit="bin"):
                 tqdm.write(label)
