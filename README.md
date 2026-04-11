@@ -4,7 +4,7 @@ LLM-enhanced decompiler from compiled Go binaries back to source code. The pipel
 
 ## Setup
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Go, and [Ghidra](https://ghidra-sre.org/) (for decompilation).
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Go, and [Ghidra](https://ghidra-sre.org/) (for decompilation). Optional: [GoReSym](https://github.com/mandiant/GoReSym) (for stripped binary symbol recovery).
 
 ```bash
 uv sync
@@ -65,7 +65,7 @@ uv run map-sources --repo ollama/ollama
 
 ### 3. Decompile binaries with Ghidra
 
-Runs Ghidra's decompiler on each binary via PyGhidra. Outputs one `.c` file per binary with `// Function: {name}` markers.
+Runs Ghidra's decompiler on each binary via PyGhidra. Outputs one `.c` file per binary with `// Function: {name}` markers. For `stripped` binaries, [GoReSym](https://github.com/mandiant/GoReSym) is automatically invoked (if installed) to recover function names and boundaries from Go's `pclntab` before Ghidra's auto-analysis, restoring real Go symbol names that would otherwise be lost.[^1]
 
 ```bash
 uv run decompile
@@ -179,4 +179,4 @@ uv run count-tokens data/decomps/ollama__ollama/default/chat.c
 uv run count-tokens data/binaries/ollama__ollama/default/chat --model gemini-2.0-flash-lite
 ```
 
-[^1]: **Stripped binaries.** Filtering currently targets unstripped variants (`default`, `debug`) only. For `stripped` binaries, Ghidra replaces symbol names with addresses (`FUN_XXXXXXXX`), so the module-path filter cannot match them directly. [GoReSym](https://github.com/mandiant/GoReSym) can recover full symbol names and addresses from stripped Go binaries via pclntab parsing, which would allow address-based filtering and renaming. However, Ghidra's decompilation of stripped Go binaries is severely limited — in our testing it recovered only ~55% of functions compared to unstripped builds, and only ~7% of user-defined repo functions appeared in the stripped decomp. The bottleneck is Ghidra's analysis, not symbol recovery.
+[^1]: **Stripped binaries.** Stripped Go binaries (`-ldflags="-s -w"`) lose their ELF symbol table and DWARF info, but Go's `pclntab` (program counter line table) survives because the runtime needs it. GoReSym parses `pclntab` to recover function names and boundaries, which are injected into Ghidra before auto-analysis. This restores real Go symbol names (e.g. `github.com/ollama/ollama/api.Func` instead of `FUN_004a1000`), enabling the downstream filter and chunk pipeline to classify them by module path. If GoReSym is not installed, the decompiler degrades gracefully and continues with Ghidra's default `FUN_` names. Note: Ghidra's decompilation of stripped Go binaries is still limited — in our testing it produced output for only ~55% of functions compared to unstripped builds, even with correct boundaries from GoReSym. The bottleneck is Ghidra's decompiler (lacking type info), not symbol recovery.

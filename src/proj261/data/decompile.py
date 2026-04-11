@@ -14,6 +14,7 @@ import multiprocessing as mp
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -42,6 +43,114 @@ _HEX_ADDR_SUFFIX_RE = re.compile(r"_([0-9a-fA-F]{6,16})$")
 
 def load_metadata() -> dict:
     return json.loads(METADATA_PATH.read_text())
+
+
+# --------------------------------------------------------------------------- #
+#  GoReSym integration (stripped Go binary symbol recovery)
+# --------------------------------------------------------------------------- #
+
+def run_goresym(binary_path: Path) -> dict | None:
+    """Run GoReSym on a binary and return parsed JSON, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["goresym", "-d", "-p", str(binary_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except FileNotFoundError:
+        tqdm.write("    WARNING: goresym not found on PATH; skipping symbol recovery")
+        return None
+    except subprocess.TimeoutExpired:
+        tqdm.write("    WARNING: goresym timed out; skipping symbol recovery")
+        return None
+
+    if result.returncode != 0:
+        tqdm.write(f"    WARNING: goresym exited with code {result.returncode}; skipping symbol recovery")
+        return None
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        tqdm.write("    WARNING: goresym produced invalid JSON; skipping symbol recovery")
+        return None
+
+
+def _sanitize_ghidra_name(name: str) -> str:
+    """Replace characters that Ghidra rejects in symbol names.
+
+    Go generic type parameters produce names like
+    ``HashTrieMap[go.shape.interface {},go.shape.interface {}]``
+    which contain ``[]{}`` — invalid for Ghidra symbols.
+    """
+    return (name
+            .replace("[", "<")
+            .replace("]", ">")
+            .replace("{", "(")
+            .replace("}", ")")
+            .replace(" ", "_"))
+
+
+def inject_goresym_symbols(program, goresym_data: dict) -> tuple[int, int]:
+    """Inject GoReSym-recovered symbols into a Ghidra program.
+
+    Iterates UserFunctions and StdFunctions from GoReSym JSON. For each:
+    - If a function exists at the address with a FUN_ name, rename it.
+    - If no function exists, create one with the correct boundaries.
+
+    Must run inside an explicit transaction since this modifies the program
+    database before Ghidra's auto-analysis.
+
+    Returns (renamed_count, created_count).
+    """
+    from ghidra.program.model.symbol import SourceType
+    from ghidra.program.model.address import AddressSet
+
+    addr_space = program.getAddressFactory().getDefaultAddressSpace()
+    func_mgr = program.getFunctionManager()
+
+    renamed = 0
+    created = 0
+    errors = 0
+
+    all_funcs = []
+    for key in ("UserFunctions", "StdFunctions"):
+        all_funcs.extend(goresym_data.get(key, []) or [])
+
+    tid = program.startTransaction("GoReSym symbol injection")
+    try:
+        for entry in all_funcs:
+            try:
+                name = entry.get("FullName") or entry.get("PackageName", "")
+                start = entry.get("Start")
+                end = entry.get("End")
+                if not name or start is None:
+                    continue
+                name = _sanitize_ghidra_name(name)
+
+                start_addr = addr_space.getAddress(start)
+                existing = func_mgr.getFunctionAt(start_addr)
+
+                if existing is not None:
+                    if existing.getName().startswith("FUN_"):
+                        existing.setName(name, SourceType.USER_DEFINED)
+                        renamed += 1
+                else:
+                    if end is not None and end > start:
+                        end_addr = addr_space.getAddress(end - 1)  # GoReSym End is exclusive
+                        body = AddressSet(start_addr, end_addr)
+                        func_mgr.createFunction(name, start_addr, body, SourceType.USER_DEFINED)
+                        created += 1
+            except Exception as e:
+                errors += 1
+                if errors <= 3:
+                    tqdm.write(f"    GoReSym inject error: {e}")
+                continue
+    finally:
+        program.endTransaction(tid, True)
+
+    if errors > 3:
+        tqdm.write(f"    GoReSym: ... and {errors - 3} more errors")
+
+    return renamed, created
 
 
 # --------------------------------------------------------------------------- #
@@ -385,11 +494,14 @@ def decompile_program(program, output_path: Path) -> bool:
     return output_path.exists() and output_path.stat().st_size > 0
 
 
-def process_binary(project, binary_path: Path, output_path: Path) -> bool:
+def process_binary(project, binary_path: Path, output_path: Path, variant: str = "default") -> bool:
     """Import, analyze, and decompile a single binary within an open project.
 
     The program is loaded into the project, analyzed, decompiled, then the
     project file is deleted to keep disk use low.
+
+    For stripped binaries, GoReSym is used to recover function names and
+    boundaries from Go's pclntab before Ghidra's auto-analysis runs.
     """
     import pyghidra
 
@@ -406,6 +518,11 @@ def process_binary(project, binary_path: Path, output_path: Path) -> bool:
 
         # Open, analyze, decompile
         with pyghidra.program_context(project, f"/{program_name}") as program:
+            if variant == "stripped":
+                goresym_data = run_goresym(binary_path)
+                if goresym_data is not None:
+                    renamed, created = inject_goresym_symbols(program, goresym_data)
+                    tqdm.write(f"    GoReSym: renamed {renamed}, created {created} functions")
             pyghidra.analyze(program, monitor)
             ok = decompile_program(program, output_path)
 
@@ -491,7 +608,7 @@ def _worker_task(entry_ser: dict) -> tuple[str, bool]:
         return label + " (binary missing)", False
 
     tqdm.write(label)
-    ok = process_binary(_g_project, binary_path, output_path)
+    ok = process_binary(_g_project, binary_path, output_path, variant=entry_ser["variant"])
     return label, ok
 
 
@@ -588,7 +705,7 @@ def main():
                         continue
 
                     tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
-                    ok = process_binary(project, binary_path, output_path)
+                    ok = process_binary(project, binary_path, output_path, variant=entry["variant"])
                     if ok:
                         succeeded += 1
                     else:
@@ -601,7 +718,7 @@ def main():
         with ctx.Pool(processes=n_threads, initializer=_worker_init, initargs=(str(GHIDRA_INSTALL),)) as pool:
             results = pool.imap_unordered(_worker_task, ser_entries)
             for label, ok in tqdm(results, total=len(entries), desc="Decompiling", unit="bin"):
-                tqdm.write(label)
+                tqdm.write(f"[DONE] {label}")
                 if ok:
                     succeeded += 1
                 else:
