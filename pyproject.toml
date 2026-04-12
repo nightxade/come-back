@@ -20,6 +20,7 @@ decompile = "proj261.data.decompile:main"
 filter-decomps = "proj261.data.filter_decomps:main"
 chunk-decomps = "proj261.data.chunk_decomps:main"
 map-sources = "proj261.data.map_sources:main"
+chunk-sources = "proj261.data.chunk_sources:main"
 scrape-repos = "proj261.data.scrape_go_repos:main"
 
 [tool.uv]

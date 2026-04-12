@@ -11,6 +11,7 @@ BINARIES_DIR = DATA_DIR / "binaries"
 DECOMPS_DIR = DATA_DIR / "decomps"
 FILTERED_DECOMPS_DIR = DATA_DIR / "decomps_filtered"
 CHUNKED_DECOMPS_DIR = DATA_DIR / "decomps_chunked"
+CHUNKED_SOURCES_DIR = DATA_DIR / "source_chunked"
 REPOS_DIR = DATA_DIR / "repos"
 OUT_DIR = PROJECT_DIR / "out"
 
