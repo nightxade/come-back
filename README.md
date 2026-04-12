@@ -35,9 +35,10 @@ data/
     └── manifest.json
 
 out/
-└── {owner__repo}/{variant}/{binary}/
-    ├── metadata.json       # Inference metadata (mode, model, tokens, per-function status)
-    └── {package}/{function}.go  # Per-function recovered Go source
+├── pred/{owner__repo}/{variant}/{binary}/
+│   ├── metadata.json       # Inference metadata (mode, model, tokens, per-function status)
+│   └── {package}/{function}.go  # Per-function recovered Go source
+└── results/{metric}/{owner__repo}/{variant}/{binary}.json  # Evaluation results
 ```
 
 Build variants: `default`, `debug` (`-gcflags=-N -l`), `stripped` (`-ldflags=-s -w`).
@@ -190,6 +191,38 @@ Modes:
 - **decomp** — sends only the Ghidra `.c` decompilation
 - **binary** — sends only the raw compiled binary
 - **decomp+binary** — sends both together
+
+### 9. Evaluate inference output
+
+Compares recovered `.go` files against the original source chunks using pluggable comparison metrics. Matches functions by file stem (the shared naming pipeline from `chunk-decomps` / `chunk-sources`), calls a metric's `compare_functions`, and writes per-binary JSON results to `data/eval_results/`.
+
+```bash
+uv run compare --metric example
+uv run compare --metric example --repo ollama/ollama --variant default
+uv run compare --metric example --max-repos 5
+uv run compare --metric example --force   # re-evaluate existing results
+```
+
+| Flag | Description |
+|------|-------------|
+| `--metric` | **Required.** Name of comparison metric (loads `proj261.eval.comparisons.<metric>`) |
+| `--repo` | Filter to a specific repo |
+| `--variant` | Filter to a build variant |
+| `--max-repos` | Limit number of repos |
+| `--max-binaries` | Limit total number of binaries to process |
+| `--force` | Re-evaluate even if results exist |
+
+**Writing a custom metric.** Create a module at `src/proj261/eval/comparisons/<name>.py` that defines:
+
+```python
+def compare_functions(source: str, inferred: str, decomp: str, metadata: dict) -> dict:
+    """Return at least {"score": float_0_to_1}."""
+
+def aggregate(results: list[dict]) -> dict:
+    """Summarize a list of per-function result dicts."""
+```
+
+Then run it with `--metric <name>`. An `example` placeholder metric is included for testing.
 
 ### Utilities
 

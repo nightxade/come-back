@@ -14,6 +14,7 @@ CHUNKED_DECOMPS_DIR = DATA_DIR / "decomps_chunked"
 CHUNKED_SOURCES_DIR = DATA_DIR / "source_chunked"
 REPOS_DIR = DATA_DIR / "repos"
 OUT_DIR = PROJECT_DIR / "out"
+PRED_DIR = OUT_DIR / "pred"
 
 def safe_name(full_name: str) -> str:
     """Standardized name sanitization for repo names (e.g. owner/repo -> owner__repo)."""

@@ -5,7 +5,7 @@ Reads data/metadata.json to discover binaries, then for each one:
   - Optionally uploads the raw binary via the Gemini Files API
   - Loads chunked decomps from data/decomps_chunked/
   - Sends each chunk to Gemini with a mode-appropriate prompt
-  - Writes recovered Go source to out/<owner__repo>/<variant>/<binary>/
+  - Writes recovered Go source to out/pred/<owner__repo>/<variant>/<binary>/
 
 Modes:
   decomp        — send only the Ghidra decompilation
@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from proj261.util import METADATA_PATH, BINARIES_DIR, CHUNKED_DECOMPS_DIR, OUT_DIR, PROJECT_DIR, DEFAULT_MODEL, safe_name
+from proj261.util import METADATA_PATH, BINARIES_DIR, CHUNKED_DECOMPS_DIR, PRED_DIR, PROJECT_DIR, DEFAULT_MODEL, safe_name
 
 from dotenv import load_dotenv
 from google import genai
@@ -193,7 +193,7 @@ def process_binary(
     binary_path = Path(entry["binary_path"])
 
     sname = safe_name(repo)
-    out_dir = OUT_DIR / sname / variant / binary
+    out_dir = PRED_DIR / sname / variant / binary
     meta_path = out_dir / "metadata.json"
 
     # Resumability: skip if already completed
@@ -323,7 +323,7 @@ def run_batch_inference(client, entries, args):
         sname = safe_name(entry["repo"])
         variant = entry["variant"]
         binary = entry["binary"]
-        out_dir = OUT_DIR / sname / variant / binary
+        out_dir = PRED_DIR / sname / variant / binary
 
         # Resumability check for binary
         meta_path = out_dir / "metadata.json"
@@ -491,7 +491,7 @@ def run_batch_inference(client, entries, args):
 
             res_meta = binary_results[binary_key]
             entry = next(w["entry"] for w in all_work if f"{w['entry']['repo']}|{w['entry']['variant']}|{w['entry']['binary']}" == binary_key)
-            out_dir = OUT_DIR / safe_name(entry["repo"]) / entry["variant"] / entry["binary"]
+            out_dir = PRED_DIR / safe_name(entry["repo"]) / entry["variant"] / entry["binary"]
             out_file = out_dir / f"{rel_path}.go"
             out_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -537,7 +537,7 @@ def run_batch_inference(client, entries, args):
             res_meta["finished_at"] = datetime.now(timezone.utc).isoformat()
 
             entry = next(w["entry"] for w in all_work if f"{w['entry']['repo']}|{w['entry']['variant']}|{w['entry']['binary']}" == binary_key)
-            meta_path = OUT_DIR / safe_name(entry["repo"]) / entry["variant"] / entry["binary"] / "metadata.json"
+            meta_path = PRED_DIR / safe_name(entry["repo"]) / entry["variant"] / entry["binary"] / "metadata.json"
             meta_path.write_text(json.dumps(res_meta, indent=2))
 
     finally:
@@ -669,7 +669,7 @@ def main():
         pending = []
         for e in entries:
             sname = safe_name(e["repo"])
-            meta_path = OUT_DIR / sname / e["variant"] / e["binary"] / "metadata.json"
+            meta_path = PRED_DIR / sname / e["variant"] / e["binary"] / "metadata.json"
             if meta_path.exists():
                 try:
                     existing = json.loads(meta_path.read_text())
@@ -734,7 +734,7 @@ def print_summary(results):
     print(f"  Errors:     {errored}")
     print(f"  Tokens in:  {total_in:,}")
     print(f"  Tokens out: {total_out:,}")
-    print(f"  Output dir: {OUT_DIR}")
+    print(f"  Output dir: {PRED_DIR}")
     print(f"{'='*60}")
 
 
