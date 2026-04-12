@@ -1,11 +1,14 @@
-"""Split filtered decomps into per-function files grouped by Go package.
+"""Split filtered decomps into per-source-function files grouped by Go package.
 
-Each function from the filtered decomp gets its own ``.c`` file, organized
-into package subdirectories under
+Decomp functions that originate from the same source-level declaration
+(closures, defer wrappers, generic instantiations, pointer-receiver
+wrappers) are consolidated into a single ``.c`` file, organized into
+package subdirectories under
 ``data/decomps_chunked/{repo}/{variant}/{binary}/``.
 
-A ``manifest.json`` alongside the package directories lists every function
-with its package, filename, and estimated token count.
+A ``manifest.json`` alongside the package directories lists every
+consolidated file with its source function, constituent decomp functions,
+package, filename, and estimated token count.
 """
 
 import argparse
@@ -229,6 +232,115 @@ def simplify_generic_suffix(name: str) -> str:
     return f"{base}_{kind}{suffix}"
 
 
+def _strip_type_params(name: str) -> str:
+    """Strip generic type parameters: ``(*Map[K,V]).Method`` → ``(*Map).Method``."""
+    result: list[str] = []
+    depth = 0
+    for ch in name:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        elif depth == 0:
+            result.append(ch)
+    return "".join(result)
+
+
+_COMPILER_SUFFIX_RE = re.compile(r"\.(func\d+|deferwrap\d*)$")
+
+
+def _has_compiler_suffix(func_part: str) -> bool:
+    """Check if a func part contains ``.funcN`` or ``.deferwrapN``."""
+    return bool(
+        re.search(r"\.func\d+", func_part)
+        or re.search(r"\.deferwrap\d*", func_part)
+    )
+
+
+def _extract_base_function(func_part: str) -> str:
+    """Extract the source-level declaration name from a func part.
+
+    For methods (``(*Type).Method.func1``): returns ``(*Type).Method``.
+    For plain functions (``init.Uint64.func24``): returns the first
+    dot-separated component (``init``).
+    """
+    if func_part.startswith("("):
+        # Method — find closing ')' then take the next .Component
+        depth = 0
+        close = 0
+        for close, ch in enumerate(func_part):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+        rest = func_part[close + 1 :]
+        if rest.startswith("."):
+            dot = rest.find(".", 1)
+            if dot == -1:
+                return func_part[: close + 1] + rest
+            return func_part[: close + 1] + rest[:dot]
+        return func_part[: close + 1]
+
+    # Plain function — first dot-separated component
+    dot = func_part.find(".")
+    if dot == -1:
+        return func_part
+    return func_part[:dot]
+
+
+def _strip_pointer_receiver(func_part: str) -> str:
+    """Normalize pointer-receiver methods to value-receiver form.
+
+    ``(*Duration).MarshalJSON`` → ``Duration.MarshalJSON``
+
+    The Go compiler generates a pointer-receiver forwarding wrapper
+    ``(*T).Method`` for every value-receiver method ``T.Method``.  Both
+    should map to the same source function.
+    """
+    if func_part.startswith("(*"):
+        close = func_part.find(")")
+        if close != -1:
+            inner = func_part[2:close]  # strip "(*" and ")"
+            return inner + func_part[close + 1:]
+    return func_part
+
+
+def get_source_function(func_name: str, module_path: str) -> str:
+    """Map a decomp function name to its source-level parent.
+
+    Strips compiler-generated artefacts so that closures, defer wrappers,
+    generic instantiations, and pointer-receiver wrappers all resolve to
+    the same source declaration.
+
+    Examples (module_path="github.com/ollama/ollama"):
+
+        envconfig.init.Uint64.func24          -> envconfig.init
+        api.(*Client).Chat.func1              -> api.Client.Chat
+        api.(*Client).stream.deferwrap1       -> api.Client.stream
+        main.main.func1                       -> main.main
+        orderedmap.(*Map[K,V]).MarshalJSON     -> orderedmap.Map.MarshalJSON
+        api.ChatRequest.String                -> api.ChatRequest.String
+        api.(*Duration).MarshalJSON           -> api.Duration.MarshalJSON
+        api.Duration.MarshalJSON              -> api.Duration.MarshalJSON
+    """
+    pkg = extract_package(func_name, module_path)
+    func_part = extract_func_part(func_name, pkg)
+
+    # Strip generic type parameters
+    func_part = _strip_type_params(func_part)
+
+    # If the func part has compiler-generated suffixes, extract the base
+    if _has_compiler_suffix(func_part):
+        func_part = _extract_base_function(func_part)
+
+    # Normalize pointer-receiver wrappers: (*T).Method -> T.Method
+    func_part = _strip_pointer_receiver(func_part)
+
+    return f"{pkg}.{func_part}"
+
+
 MAX_FILENAME_LEN = 200  # leave room for path prefix and .c extension
 
 
@@ -288,9 +400,11 @@ def split_functions(c_source: str) -> list[tuple[str, str]]:
 
 
 def chunk_binary(decomp_path: Path, output_dir: Path, module_path: str) -> dict | None:
-    """Split a single filtered decomp into per-function files by package.
+    """Split a single filtered decomp into per-source-function files by package.
 
-    Returns manifest dict on success, None on failure.
+    Decomp functions sharing the same source-level declaration are
+    consolidated into a single file.  Returns manifest dict on success,
+    None on failure.
     """
     c_source = decomp_path.read_text()
     functions = split_functions(c_source)
@@ -302,16 +416,26 @@ def chunk_binary(decomp_path: Path, output_dir: Path, module_path: str) -> dict 
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Group phase: bucket decomp functions by source function ---
+    # Preserves insertion order so output is deterministic.
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for func_name, block in functions:
+        src_func = get_source_function(func_name, module_path)
+        groups.setdefault(src_func, []).append((func_name, block))
+
+    # --- Write phase: one file per source function ---
     packages: dict[str, int] = {}
     manifest_functions = []
     seen_filenames: dict[str, int] = {}  # track duplicates per package dir
 
-    for func_name, block in functions:
-        pkg = extract_package(func_name, module_path)
-        func_part = extract_func_part(func_name, pkg)
+    for src_func, members in groups.items():
+        pkg = extract_package(src_func, module_path)
+        src_func_part = extract_func_part(src_func, pkg)
 
         pkg_dir_name = package_to_dir(pkg, module_path)
-        func_file_name = sanitize_for_filename(simplify_generic_suffix(func_part))
+        func_file_name = sanitize_for_filename(
+            simplify_generic_suffix(src_func_part)
+        )
 
         # Handle duplicate filenames within the same package dir
         key = f"{pkg_dir_name}/{func_file_name}"
@@ -324,19 +448,24 @@ def chunk_binary(decomp_path: Path, output_dir: Path, module_path: str) -> dict 
         pkg_subdir = output_dir / pkg_dir_name
         pkg_subdir.mkdir(parents=True, exist_ok=True)
 
+        # Concatenate all blocks belonging to this source function
+        combined = "\n".join(block for _, block in members)
+
         func_file = pkg_subdir / f"{func_file_name}.c"
-        func_file.write_text(block)
+        func_file.write_text(combined)
 
         packages[pkg] = packages.get(pkg, 0) + 1
         manifest_functions.append({
-            "function": func_name,
+            "source_function": src_func,
+            "functions": [name for name, _ in members],
             "package": pkg,
             "file": f"{pkg_dir_name}/{func_file_name}.c",
-            "estimated_tokens": estimate_tokens(block),
+            "estimated_tokens": estimate_tokens(combined),
         })
 
     manifest = {
         "total_functions": len(functions),
+        "total_source_functions": len(groups),
         "total_packages": len(packages),
         "functions": manifest_functions,
     }
@@ -425,6 +554,7 @@ def main():
     succeeded = 0
     failed = 0
     total_funcs = 0
+    total_src_funcs = 0
 
     for entry in tqdm(entries, desc="Chunking", unit="bin"):
         bp = str(entry["binary_path"])
@@ -447,13 +577,17 @@ def main():
 
         succeeded += 1
         total_funcs += manifest["total_functions"]
+        total_src_funcs += manifest["total_source_functions"]
         tqdm.write(f"  {entry['repo']} {entry['variant']}/{entry['binary']}  "
-                   f"{manifest['total_functions']} funcs ({manifest['total_packages']} pkgs)")
+                   f"{manifest['total_source_functions']} files "
+                   f"({manifest['total_functions']} funcs, "
+                   f"{manifest['total_packages']} pkgs)")
 
     print(f"\n{'='*60}")
     print(f"  Succeeded:  {succeeded}")
     print(f"  Failed:     {failed}")
     print(f"  Functions:  {total_funcs:,} total")
+    print(f"  Source fns: {total_src_funcs:,} consolidated files")
     print(f"  Output dir: {CHUNKED_DECOMPS_DIR}")
     print(f"{'='*60}")
 

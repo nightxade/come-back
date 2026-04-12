@@ -27,8 +27,11 @@ data/
 ├── binaries/{owner__repo}/{variant}/{binary}   # Compiled binaries
 ├── decomps/{owner__repo}/{variant}/{binary}.c  # Ghidra decompilation output
 ├── decomps_filtered/{owner__repo}/{variant}/{binary}.c  # Filtered (user-only) decomps
-└── decomps_chunked/{owner__repo}/{variant}/{binary}/    # Per-function decomp files
-    ├── {package}/{function}.c
+├── decomps_chunked/{owner__repo}/{variant}/{binary}/    # Per-function decomp files
+│   ├── {package}/{function}.c
+│   └── manifest.json
+└── source_chunked/{owner__repo}/{variant}/{binary}/     # Per-function source files
+    ├── {package}/{function}.go
     └── manifest.json
 
 out/
@@ -105,7 +108,7 @@ The inference step automatically prefers chunked decomps when available, then fi
 
 ### 5. Chunk decomps into per-function files
 
-Splits each filtered decomp into one file per function, organized into package subdirectories that mirror the Go source layout (the module path prefix is stripped using `go version -m`). Each function's decompiled C pseudocode gets its own `.c` file, enabling per-function LLM inference. Go generic instantiation shapes (e.g. `Func[go.shape.struct_{...}]`) are simplified to a short type tag in the filename (e.g. `Func_struct.c`); duplicates from multiple instantiations of the same kind get numeric suffixes.
+Splits each filtered decomp into one file per function, organized into package subdirectories that mirror the Go source layout (the module path prefix is stripped using `go version -m`). Each function's decompiled C pseudocode gets its own `.c` file, enabling per-function LLM inference. Go generic instantiation shapes (e.g. `Func[go.shape.struct_{...}]`) are simplified to a short type tag in the filename (e.g. `Func_struct.c`); duplicates from multiple instantiations of the same kind get numeric suffixes. Each manifest entry includes a `source_function` field that maps compiler-generated artefacts (closures like `Foo.func1`, defer wrappers like `Foo.deferwrap1`, generic instantiations) back to the source-level declaration, enabling grouping for evaluation.
 
 ```bash
 uv run chunk-decomps
@@ -122,7 +125,25 @@ uv run chunk-decomps --force
 
 The inference step automatically prefers chunked decomps when available.
 
-### 6. Validate filtering (optional)
+### 6. Chunk source files for evaluation
+
+Parses Go source files from `data/repos/` into per-function `.go` files using the same naming pipeline as `chunk-decomps`, so output paths align for evaluation (CodeBLEU, edit distance, compilability). Reads `source_map.json` to determine which source files belong to each binary.
+
+```bash
+uv run chunk-sources
+uv run chunk-sources --repo ollama/ollama
+uv run chunk-sources --variant default --force
+uv run chunk-sources --max-repos 10
+```
+
+| Flag | Description |
+|------|-------------|
+| `--repo` | Filter to a specific repo |
+| `--variant` | Filter to a build variant |
+| `--max-repos` | Limit number of repos |
+| `--force` | Re-chunk even if output exists |
+
+### 7. Validate filtering (optional)
 
 Compares the filter's classification against `source_map.json` ground truth at the package level. With `--deep`, also verifies at the function level by parsing Go source declarations and tracing them through the binary's symbol table into the decomp.
 
@@ -140,7 +161,7 @@ uv run validate-filter --variant default
 
 Deep validation distinguishes between filter bugs (function is in the raw decomp but missing from the filtered one) and Ghidra limitations (function is in the binary but Ghidra failed to decompile it).
 
-### 7. LLM inference with Gemini
+### 8. LLM inference with Gemini
 
 Sends Ghidra decompilations and/or raw binaries to Gemini to recover Go source code. Uses the Batch API by default for efficiency.
 
