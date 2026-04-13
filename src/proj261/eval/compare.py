@@ -18,7 +18,7 @@ from proj261.util import (
     PRED_DIR,
     safe_name,
 )
-from proj261.eval.comparisons import get_comparator
+from proj261.eval.comparisons import get_comparator, get_metric_module
 from tqdm import tqdm
 
 
@@ -239,6 +239,18 @@ def print_summary(results, aggregate_fn):
 # --------------------------------------------------------------------------- #
 
 def main():
+    # Two-pass parse: first grab --metric so we can load metric-specific args,
+    # then re-parse with the full set.
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--metric", required=True)
+    pre_args, _ = pre_parser.parse_known_args()
+
+    try:
+        metric_module = get_metric_module(pre_args.metric)
+    except ImportError as e:
+        print(f"Error loading metric '{pre_args.metric}': {e}")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="Compare inference output against original source chunks.",
     )
@@ -266,7 +278,16 @@ def main():
         "--force", action="store_true",
         help="Re-evaluate even if results exist",
     )
+
+    # Let the metric add its own CLI flags
+    if hasattr(metric_module, "add_args"):
+        metric_module.add_args(parser)
+
     args = parser.parse_args()
+
+    # Let the metric initialize (e.g. create API clients)
+    if hasattr(metric_module, "configure"):
+        metric_module.configure(args)
 
     # Load comparator
     try:
