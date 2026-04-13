@@ -5,11 +5,13 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "codebleu>=0.7.0",
     "dotenv>=0.9.9",
     "google-genai>=1.70.0",
     "normalizer>=0.2.1",
     "pyghidra>=3.0.2",
     "tqdm>=4.67.3",
+    "tree-sitter-go==0.21.2",
 ]
 
 [project.scripts]

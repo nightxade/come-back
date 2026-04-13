@@ -194,7 +194,7 @@ Modes:
 
 ### 9. Evaluate inference output
 
-Compares recovered `.go` files against the original source chunks using pluggable comparison metrics. Matches functions by file stem (the shared naming pipeline from `chunk-decomps` / `chunk-sources`), calls a metric's `compare_functions`, and writes per-binary JSON results to `data/eval_results/`.
+Compares recovered `.go` files against the original source chunks using pluggable comparison metrics. Matches functions by file stem (the shared naming pipeline from `chunk-decomps` / `chunk-sources`), calls a metric's `compare_functions`, and writes per-binary JSON results to `out/results/`.
 
 ```bash
 uv run compare --metric example
@@ -222,7 +222,32 @@ def aggregate(results: list[dict]) -> dict:
     """Summarize a list of per-function result dicts."""
 ```
 
-Then run it with `--metric <name>`. An `example` placeholder metric is included for testing.
+Then run it with `--metric <name>`. Metrics may also define optional `add_args(parser)` and `configure(args)` hooks to register and consume their own CLI flags.
+
+#### Built-in metrics
+
+**`codebleu`** — [CodeBLEU](https://github.com/k4black/codebleu): weighted combination of n-gram match, weighted n-gram match, AST match, and data-flow match. Runs locally, no API key needed.
+
+```bash
+uv run compare --metric codebleu --repo ollama/ollama
+```
+
+Per-function results include `score`, `ngram_match`, `weighted_ngram_match`, `syntax_match`, and `dataflow_match`.
+
+**`llm`** — LLM-as-a-judge via the Gemini API. Asks the model to rate semantic similarity between original and inferred code on a 0–10 scale (normalized to 0–1). Requires `GEMINI_API_KEY`.
+
+```bash
+uv run compare --metric llm --repo ollama/ollama
+uv run compare --metric llm --explain              # include per-function explanations
+uv run compare --metric llm --model gemini-2.5-flash  # use a different judge model
+```
+
+| LLM-specific flag | Description |
+|-------------------|-------------|
+| `--explain` | Ask the model for an explanation alongside the score |
+| `--model` | Gemini model to use as judge (default: `gemini-3.1-flash-lite-preview`) |
+
+**`example`** — Placeholder that always returns 0. Useful for testing the framework end-to-end.
 
 ### Utilities
 
