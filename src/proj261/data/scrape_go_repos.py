@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from proj261.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH
+from proj261.util import DATA_DIR, REPOS_DIR, BINARIES_DIR, METADATA_PATH, safe_name
 
 from tqdm import tqdm
 
@@ -189,7 +189,7 @@ def find_main_packages(repo_dir: str) -> list[str]:
         return []
 
 
-def compile_repos(meta: dict) -> dict:
+def compile_repos(meta: dict, force: bool = False) -> dict:
     """Compile all cloned repos with each build variant."""
     BINARIES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -205,9 +205,15 @@ def compile_repos(meta: dict) -> dict:
         if not Path(repo_dir).exists():
             continue
 
-        # Skip if all variants already compiled
-        if info.get("compiled_at") and all(v in info.get("binaries", {}) for v in BUILD_VARIANTS):
-            continue
+        # Skip if all variants already compiled and binaries exist on disk (unless --force)
+        if not force and info.get("compiled_at") and all(v in info.get("binaries", {}) for v in BUILD_VARIANTS):
+            binaries_on_disk = all(
+                (BINARIES_DIR / sname / v / b).exists()
+                for v, bins in info["binaries"].items()
+                for b in bins
+            )
+            if binaries_on_disk:
+                continue
 
         # Discover main packages
         main_pkgs = find_main_packages(repo_dir)
@@ -221,10 +227,18 @@ def compile_repos(meta: dict) -> dict:
             variant_dir.mkdir(parents=True, exist_ok=True)
 
             built_binaries: list[str] = []
+            seen_names: dict[str, int] = {}
 
             for pkg in main_pkgs:
-                # Use last component of import path as binary name
-                bin_name = pkg.rsplit("/", 1)[-1]
+                # Use last component of import path as binary name,
+                # disambiguating duplicates with a numeric suffix.
+                base_name = pkg.rsplit("/", 1)[-1]
+                if base_name in seen_names:
+                    seen_names[base_name] += 1
+                    bin_name = f"{base_name}_{seen_names[base_name]}"
+                else:
+                    seen_names[base_name] = 1
+                    bin_name = base_name
                 out_path = variant_dir / bin_name
 
                 cmd = ["go", "build"] + extra_flags + ["-o", str(out_path), pkg]
@@ -267,6 +281,7 @@ def main():
     parser.add_argument("--max-repos", type=int, default=200, help="Max repos to scrape (default: 200)")
     parser.add_argument("--discover-only", action="store_true", help="Only discover repos, don't clone/compile")
     parser.add_argument("--compile-only", action="store_true", help="Only compile already-cloned repos")
+    parser.add_argument("--force", action="store_true", help="Recompile repos even if already compiled")
     args = parser.parse_args()
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -300,7 +315,7 @@ def main():
         meta = clone_repos(repos, meta)
 
     # Phase 3: Compile
-    meta = compile_repos(meta)
+    meta = compile_repos(meta, force=args.force)
 
     # Summary
     total = len(meta["repos"])

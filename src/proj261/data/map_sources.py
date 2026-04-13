@@ -67,11 +67,18 @@ def find_main_packages(repo_dir: str) -> dict[str, str]:
             cwd=repo_dir,
         )
         mapping = {}
+        seen_names: dict[str, int] = {}
         for line in result.stdout.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
-            bin_name = line.rsplit("/", 1)[-1]
+            base_name = line.rsplit("/", 1)[-1]
+            if base_name in seen_names:
+                seen_names[base_name] += 1
+                bin_name = f"{base_name}_{seen_names[base_name]}"
+            else:
+                seen_names[base_name] = 1
+                bin_name = base_name
             mapping[bin_name] = line
         return mapping
     except Exception:
