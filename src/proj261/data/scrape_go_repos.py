@@ -222,23 +222,29 @@ def compile_repos(meta: dict, force: bool = False) -> dict:
             save_metadata(meta)
             continue
 
+        # Build {bin_name: import_path} mapping once — the disambiguation
+        # must happen in a single place so map_sources.py can reuse it
+        # without re-running `go list`.
+        main_pkg_map: dict[str, str] = {}
+        seen_names: dict[str, int] = {}
+        for pkg in main_pkgs:
+            base_name = pkg.rsplit("/", 1)[-1]
+            if base_name in seen_names:
+                seen_names[base_name] += 1
+                bin_name = f"{base_name}_{seen_names[base_name]}"
+            else:
+                seen_names[base_name] = 1
+                bin_name = base_name
+            main_pkg_map[bin_name] = pkg
+        info["main_packages"] = main_pkg_map
+
         for variant, extra_flags in BUILD_VARIANTS.items():
             variant_dir = BINARIES_DIR / sname / variant
             variant_dir.mkdir(parents=True, exist_ok=True)
 
             built_binaries: list[str] = []
-            seen_names: dict[str, int] = {}
 
-            for pkg in main_pkgs:
-                # Use last component of import path as binary name,
-                # disambiguating duplicates with a numeric suffix.
-                base_name = pkg.rsplit("/", 1)[-1]
-                if base_name in seen_names:
-                    seen_names[base_name] += 1
-                    bin_name = f"{base_name}_{seen_names[base_name]}"
-                else:
-                    seen_names[base_name] = 1
-                    bin_name = base_name
+            for bin_name, pkg in main_pkg_map.items():
                 out_path = variant_dir / bin_name
 
                 cmd = ["go", "build"] + extra_flags + ["-o", str(out_path), pkg]

@@ -26,6 +26,7 @@ from tqdm import tqdm
 SOURCE_MAP_PATH = DATA_DIR / "source_map.json"
 
 BUILD_ENV = {"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
+LIST_TIMEOUT = 120  # seconds for `go list` commands
 
 
 def run(cmd: list[str], timeout: int = 120, cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -49,6 +50,10 @@ def save_source_map(smap: dict) -> None:
     SOURCE_MAP_PATH.write_text(json.dumps(smap, indent=2) + "\n")
 
 
+def save_metadata(meta: dict) -> None:
+    METADATA_PATH.write_text(json.dumps(meta, indent=2) + "\n")
+
+
 def get_goroot() -> str:
     result = run(["go", "env", "GOROOT"], timeout=10)
     return result.stdout.strip()
@@ -59,7 +64,12 @@ def get_goroot() -> str:
 # --------------------------------------------------------------------------- #
 
 def find_main_packages(repo_dir: str) -> dict[str, str]:
-    """Return {binary_name: import_path} for every main package in repo_dir."""
+    """Return {binary_name: import_path} for every main package in repo_dir.
+
+    Note: this is the fallback for repos whose metadata predates the
+    ``main_packages`` field.  The ``run`` helper already sets
+    ``CGO_ENABLED=0`` to match the scrape environment.
+    """
     try:
         result = run(
             ["go", "list", "-e", "-f", '{{if eq .Name "main"}}{{.ImportPath}}{{end}}', "./..."],
@@ -238,8 +248,14 @@ def process_repo(repo_name: str, repo_info: dict, smap: dict, goroot: str, done:
     if not has_any:
         return 0
 
-    # Discover main packages once
-    main_pkgs = find_main_packages(repo_dir)
+    # Use the {bin_name: import_path} mapping stored at build time.
+    # Fall back to re-discovering via `go list` for older metadata that
+    # doesn't have the mapping yet, and persist for future runs.
+    main_pkgs = repo_info.get("main_packages")
+    if main_pkgs is None:
+        main_pkgs = find_main_packages(repo_dir)
+        if main_pkgs:
+            repo_info["main_packages"] = main_pkgs
     if not main_pkgs:
         return 0
 
@@ -309,6 +325,9 @@ def main():
         if added:
             total_added += added
             save_source_map(smap)  # incremental save after each repo
+
+    # Persist any backfilled main_packages entries to metadata.
+    save_metadata(meta)
 
     # Summary
     total_mappings = len(smap["mappings"])
