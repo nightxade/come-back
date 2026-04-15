@@ -40,6 +40,21 @@ _STRING_SYM_RE = re.compile(r"\b((?:PTR_)?s_[A-Za-z0-9_]+)\b")
 # e.g. PTR_s_systemStringFormat__bytestringAc_007e0ce0 -> 007e0ce0
 _HEX_ADDR_SUFFIX_RE = re.compile(r"_([0-9a-fA-F]{6,16})$")
 
+# Regex to find DAT_<hex> symbols (Ghidra labels for unclassified data).
+_DAT_SYM_RE = re.compile(r"\b(DAT_[0-9a-fA-F]{6,16})\b")
+
+# Regex to find raw hex address constants (5-16 hex digits).
+# Excludes negated values (preceded by '-') and identifiers.
+_HEX_LITERAL_RE = re.compile(r"(?<![\w-])(0x[0-9a-fA-F]{5,16})\b")
+
+# Regex to match local_XX = VALUE; assignments (for length pairing).
+_LOCAL_ASSIGN_RE = re.compile(
+    r"\b(local_[0-9a-fA-F]+)\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;"
+)
+
+# Minimum string length for heuristic (DAT / hex) resolution.
+_MIN_STRING_LEN = 4
+
 
 def load_metadata() -> dict:
     return json.loads(METADATA_PATH.read_text())
@@ -410,9 +425,306 @@ def _resolve_missing_strings(program, c_code, string_data, attempted):
             string_data[name] = s
 
 
+def _get_rodata_ranges(program):
+    """Return ``list[(int, int)]`` of read-only, initialized, non-executable memory ranges.
+
+    Used to filter hex constants so we only attempt string resolution for
+    addresses that live in ``.rodata`` or similar sections.
+    """
+    ranges = []
+    mem = program.getMemory()
+    for block in mem.getBlocks():
+        if (block.isInitialized()
+                and not block.isExecute()
+                and (block.isRead() and not block.isWrite())):
+            start = block.getStart().getOffset()
+            end = block.getEnd().getOffset()
+            ranges.append((start, end))
+    return ranges
+
+
+def _addr_in_rodata(addr_int, ranges):
+    """Return True if *addr_int* falls within any of the rodata *ranges*."""
+    for start, end in ranges:
+        if start <= addr_int <= end:
+            return True
+    return False
+
+
+def _resolve_dat_as_string(mem, addr_factory, addr):
+    """Try to resolve a ``DAT_*`` address to a string value.
+
+    Strategies (tried in order):
+
+    1. Read 16 bytes as a Go ``(ptr, len)`` pair; follow the pointer and
+       read *len* bytes.
+    2. Follow as a single pointer (without length).
+    3. Read directly as string bytes at the address.
+
+    All strategies require ``len(result) >= _MIN_STRING_LEN``.
+    """
+    addr_space = addr_factory.getDefaultAddressSpace()
+
+    # Strategy 1: Go (ptr, len) pair
+    try:
+        ptr_val = _read_le64(mem, addr)
+        str_len = _read_le64(mem, addr.add(8))
+        if 0 < str_len <= MAX_STRING_DISPLAY_LEN:
+            target = addr_space.getAddress(ptr_val)
+            if mem.contains(target):
+                s = _read_string_with_len(mem, target, str_len)
+                if s and len(s) >= _MIN_STRING_LEN:
+                    return s
+    except Exception:
+        pass
+
+    # Strategy 2: follow as single pointer
+    try:
+        ptr_val = _read_le64(mem, addr)
+        target = addr_space.getAddress(ptr_val)
+        if mem.contains(target):
+            s = _read_string_at(mem, target)
+            if s and len(s) >= _MIN_STRING_LEN:
+                return s
+    except Exception:
+        pass
+
+    # Strategy 3: read directly at the address
+    try:
+        s = _read_string_at(mem, addr)
+        if s and len(s) >= _MIN_STRING_LEN:
+            return s
+    except Exception:
+        pass
+
+    return None
+
+
+def _find_dat_paired_length(lines, dat_name):
+    """Find a Go string length paired with a ``DAT_*`` symbol in decompiled C.
+
+    Similar to :func:`_find_paired_length` but searches all lines for the
+    *dat_name* token.  Two patterns are checked:
+
+    1. **Same-line comma** — ``func(DAT_xxx, LEN)`` or
+       ``func(&DAT_xxx, LEN)`` where *LEN* is a small integer after a comma.
+    2. **Adjacent stack locals** — ``local_X = ...DAT_xxx...;`` on one line
+       and ``local_Y = LEN;`` on an adjacent line, where
+       ``|offset(X) - offset(Y)| == 8`` (Go string header layout).
+
+    Returns ``int | None``.
+    """
+    for line_idx, line in enumerate(lines):
+        pos = line.find(dat_name)
+        if pos < 0:
+            continue
+
+        # Pattern 1: same-line comma after DAT symbol
+        after = line[pos + len(dat_name):]
+        m_comma = re.match(r"[^,;\n]{0,20},\s*(0x[0-9a-fA-F]+|\d+)", after)
+        if m_comma:
+            try:
+                val = int(m_comma.group(1), 0)
+                if 0 < val <= MAX_STRING_DISPLAY_LEN:
+                    return val
+            except ValueError:
+                pass
+
+        # Pattern 2: adjacent stack local assignments
+        m_local = re.search(r"\b(local_([0-9a-fA-F]+))\s*=", line)
+        if m_local:
+            try:
+                var_offset = int(m_local.group(2), 16)
+            except ValueError:
+                continue
+
+            for delta in (-1, 1):
+                adj_idx = line_idx + delta
+                if adj_idx < 0 or adj_idx >= len(lines):
+                    continue
+                m_adj = _LOCAL_ASSIGN_RE.search(lines[adj_idx])
+                if not m_adj:
+                    continue
+                adj_hex = m_adj.group(1).split("_", 1)[1]
+                try:
+                    adj_offset = int(adj_hex, 16)
+                except ValueError:
+                    continue
+                if abs(var_offset - adj_offset) == 8:
+                    try:
+                        val = int(m_adj.group(2), 0)
+                        if 0 < val <= MAX_STRING_DISPLAY_LEN:
+                            return val
+                    except ValueError:
+                        continue
+    return None
+
+
+def _resolve_dat_symbols(program, c_code, string_data, attempted):
+    """Resolve ``DAT_*`` references in *c_code* to string values.
+
+    Parses the hex address from the symbol name (e.g. ``DAT_007e0ce0``),
+    constructs a Ghidra address, and first tries to find a paired length
+    from the C code context for precise extraction.  Falls back to
+    :func:`_resolve_dat_as_string` heuristics when no length is found.
+    Updates *string_data* in-place.  (Approach A)
+    """
+    refs = set(_DAT_SYM_RE.findall(c_code))
+    missing = refs - set(string_data.keys()) - attempted
+    if not missing:
+        return
+
+    mem = program.getMemory()
+    addr_factory = program.getAddressFactory()
+    addr_space = addr_factory.getDefaultAddressSpace()
+    lines = c_code.splitlines()
+
+    for name in missing:
+        attempted.add(name)
+        # Extract hex address from DAT_<hex>
+        hex_str = name[4:]  # strip "DAT_"
+        try:
+            addr = addr_space.getAddress(int(hex_str, 16))
+        except Exception:
+            continue
+        if not mem.contains(addr):
+            continue
+
+        # Try to find a paired length from the C code context first.
+        # This avoids _read_string_at over-reading packed .rodata.
+        length = _find_dat_paired_length(lines, name)
+        if length is not None:
+            s = _read_string_with_len(mem, addr, length)
+            if s and len(s) >= _MIN_STRING_LEN:
+                string_data[name] = s
+                continue
+
+        # Fall back to heuristic strategies (ptr/len pair, pointer, direct)
+        s = _resolve_dat_as_string(mem, addr_factory, addr)
+        if s:
+            string_data[name] = s
+
+
+def _find_paired_length(lines, line_idx, hex_match):
+    """Heuristic to find a Go string length paired with a pointer constant.
+
+    Two patterns are checked:
+
+    1. **Same-line comma** — ``func(0xADDR, LEN)`` where *LEN* is a small
+       integer following a comma after the hex literal.
+    2. **Adjacent stack locals** — ``local_X = 0xADDR;`` on one line and
+       ``local_Y = LEN;`` on an adjacent line, where
+       ``|offset(X) - offset(Y)| == 8`` (Go string header layout).
+
+    Returns ``int | None``.
+    """
+    line = lines[line_idx]
+
+    # Pattern 1: same-line comma  e.g. func(0x7e0ce0, 0xd) or func(0x7e0ce0, 13)
+    hex_end = hex_match.end()
+    after = line[hex_end:]
+    m = re.match(r"\s*,\s*(0x[0-9a-fA-F]+|\d+)", after)
+    if m:
+        try:
+            val = int(m.group(1), 0)
+            if 0 < val <= MAX_STRING_DISPLAY_LEN:
+                return val
+        except ValueError:
+            pass
+
+    # Pattern 2: adjacent stack local assignments
+    m_local = _LOCAL_ASSIGN_RE.search(line)
+    if m_local and hex_match.group(1) == m_local.group(2):
+        var_name = m_local.group(1)           # e.g. "local_38"
+        var_hex = var_name.split("_", 1)[1]   # e.g. "38"
+        try:
+            var_offset = int(var_hex, 16)
+        except ValueError:
+            return None
+
+        # Check the line above and below for a paired length assignment
+        for delta in (-1, 1):
+            adj_idx = line_idx + delta
+            if adj_idx < 0 or adj_idx >= len(lines):
+                continue
+            m_adj = _LOCAL_ASSIGN_RE.search(lines[adj_idx])
+            if not m_adj:
+                continue
+            adj_name = m_adj.group(1)
+            adj_hex = adj_name.split("_", 1)[1]
+            try:
+                adj_offset = int(adj_hex, 16)
+            except ValueError:
+                continue
+            # Go string header: ptr at offset N, len at offset N+8 (or N-8)
+            if abs(var_offset - adj_offset) == 8:
+                try:
+                    val = int(m_adj.group(2), 0)
+                    if 0 < val <= MAX_STRING_DISPLAY_LEN:
+                        return val
+                except ValueError:
+                    continue
+    return None
+
+
+def _resolve_hex_string_constants(program, c_code, string_data, rodata_ranges, attempted):
+    """Resolve bare hex address constants that point into ``.rodata``.
+
+    Finds hex literals in *c_code* whose values fall within *rodata_ranges*,
+    pairs them with a length when possible, and reads the string from memory.
+    Falls back to :func:`_read_string_at` when no length is found.
+    Keys in *string_data* are the hex literal strings (e.g. ``"0x7e0ce0"``).
+    (Approach B)
+    """
+    if not rodata_ranges:
+        return
+
+    mem = program.getMemory()
+    addr_factory = program.getAddressFactory()
+    addr_space = addr_factory.getDefaultAddressSpace()
+
+    lines = c_code.splitlines()
+
+    for line_idx, line in enumerate(lines):
+        for m in _HEX_LITERAL_RE.finditer(line):
+            hex_str = m.group(1)
+            if hex_str in string_data or hex_str in attempted:
+                continue
+            attempted.add(hex_str)
+
+            try:
+                addr_int = int(hex_str, 16)
+            except ValueError:
+                continue
+            if not _addr_in_rodata(addr_int, rodata_ranges):
+                continue
+
+            try:
+                addr = addr_space.getAddress(addr_int)
+            except Exception:
+                continue
+            if not mem.contains(addr):
+                continue
+
+            # Try to find a paired length for precise extraction
+            length = _find_paired_length(lines, line_idx, m)
+            if length is not None:
+                s = _read_string_with_len(mem, addr, length)
+                if s and len(s) >= _MIN_STRING_LEN:
+                    string_data[hex_str] = s
+                    continue
+
+            # Fallback: read until non-printable byte
+            s = _read_string_at(mem, addr)
+            if s and len(s) >= _MIN_STRING_LEN:
+                string_data[hex_str] = s
+
+
 def _find_referenced_strings(c_code, string_data):
     """Return ``{name: value}`` for string symbols referenced in *c_code*."""
     refs = set(_STRING_SYM_RE.findall(c_code))
+    refs |= set(_DAT_SYM_RE.findall(c_code))
+    refs |= set(_HEX_LITERAL_RE.findall(c_code))
     return {name: string_data[name] for name in refs if name in string_data}
 
 
@@ -448,6 +760,7 @@ def decompile_program(program, output_path: Path) -> bool:
     # Collect resolved string data before decompiling.
     string_data = collect_string_data(program)
     resolve_attempted: set[str] = set()
+    rodata_ranges = _get_rodata_ranges(program)
 
     decompiler = DecompInterface()
     decompiler.openProgram(program)
@@ -470,6 +783,15 @@ def decompile_program(program, output_path: Path) -> bool:
                         # Resolve any symbols the data-item pass missed
                         _resolve_missing_strings(
                             program, c_str, string_data, resolve_attempted,
+                        )
+                        # Resolve DAT_* symbols (Approach A)
+                        _resolve_dat_symbols(
+                            program, c_str, string_data, resolve_attempted,
+                        )
+                        # Resolve bare hex address constants (Approach B)
+                        _resolve_hex_string_constants(
+                            program, c_str, string_data, rodata_ranges,
+                            resolve_attempted,
                         )
 
                         # Annotate with resolved string values
