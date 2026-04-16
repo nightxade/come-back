@@ -106,11 +106,19 @@ def evaluate_binary(entry, compare_fn, aggregate_fn, metric, force):
     results_dir = RESULTS_DIR / metric / sname / variant
     results_path = results_dir / f"{binary}.json"
 
-    # Skip if already evaluated
+    # Skip if already evaluated — but invalidate the cache when inference
+    # has been updated since the last comparison (i.e. new predictions were
+    # added for functions that were previously missing).
     if not force and results_path.exists():
         try:
             existing = json.loads(results_path.read_text())
-            return existing
+            stale = False
+            if existing.get("skipped_no_inference", 0) > 0:
+                inf_meta = inference_dir / "metadata.json"
+                if inf_meta.exists() and inf_meta.stat().st_mtime > results_path.stat().st_mtime:
+                    stale = True
+            if not stale:
+                return existing
         except json.JSONDecodeError:
             pass
 
