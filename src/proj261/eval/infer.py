@@ -53,21 +53,23 @@ _DECOMP_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a single "
     "decompiled C pseudocode function produced by Ghidra from a compiled Go "
     "binary. Recover the original Go source code for this function as "
-    "accurately as possible. Output ONLY valid Go code with no explanation."
+    "accurately as possible. Output ONLY valid Go code with no explanation. "
+    "Exclude package declarations and imports."
 )
 
 _BINARY_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a compiled Go "
     "binary. Analyze it and recover the original Go source code for the "
     "requested function as accurately as possible. Output ONLY valid Go code "
-    "with no explanation."
+    "with no explanation. Exclude package declarations and imports."
 )
 
 _DECOMP_BINARY_SYSTEM = (
     "You are an expert Go reverse engineer. You will be given a compiled Go "
     "binary AND the Ghidra decompiled C pseudocode for a single function. "
     "Use both to recover the original Go source code for this function as "
-    "accurately as possible. Output ONLY valid Go code with no explanation."
+    "accurately as possible. Output ONLY valid Go code with no explanation. "
+    "Exclude package declarations and imports."
 )
 
 SYSTEM_PROMPTS = {
