@@ -840,11 +840,10 @@ def process_binary(project, binary_path: Path, output_path: Path, variant: str =
 
         # Open, analyze, decompile
         with pyghidra.program_context(project, f"/{program_name}") as program:
-            if variant == "stripped":
-                goresym_data = run_goresym(binary_path)
-                if goresym_data is not None:
-                    renamed, created = inject_goresym_symbols(program, goresym_data)
-                    tqdm.write(f"    GoReSym: renamed {renamed}, created {created} functions")
+            goresym_data = run_goresym(binary_path)
+            if goresym_data is not None:
+                renamed, created = inject_goresym_symbols(program, goresym_data)
+                tqdm.write(f"    GoReSym: renamed {renamed}, created {created} functions")
             pyghidra.analyze(program, monitor)
             ok = decompile_program(program, output_path)
 
