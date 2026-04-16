@@ -1,1 +1,1 @@
-# scripts.data package
+# cs261.data package

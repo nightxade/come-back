@@ -1,1 +1,1 @@
-# scripts package
+# proj261 package
