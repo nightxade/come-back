@@ -8,6 +8,7 @@ comparison metric, and reports results as JSON + stdout summary.
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from proj261.util import (
@@ -23,6 +24,27 @@ from tqdm import tqdm
 
 
 RESULTS_DIR = OUT_DIR / "results"
+
+
+# --------------------------------------------------------------------------- #
+#  Pending-batch tracker
+# --------------------------------------------------------------------------- #
+
+def _pending_path(metric: str) -> Path:
+    return RESULTS_DIR / metric / "pending_batches.json"
+
+
+def _load_pending(metric: str) -> list[dict]:
+    p = _pending_path(metric)
+    if p.exists():
+        return json.loads(p.read_text())
+    return []
+
+
+def _save_pending(metric: str, entries: list[dict]):
+    p = _pending_path(metric)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(entries, indent=2))
 
 
 # --------------------------------------------------------------------------- #
@@ -243,6 +265,239 @@ def print_summary(results, aggregate_fn):
 
 
 # --------------------------------------------------------------------------- #
+#  Batch evaluation support
+# --------------------------------------------------------------------------- #
+
+def _collect_binary_work(entry, metric, force):
+    """Gather matchable functions for a binary without running any comparisons.
+
+    Returns ``(binary_meta, work_items)`` where *binary_meta* is a dict with
+    the skeleton result (counters, paths) and *work_items* is a list of dicts
+    each containing ``key``, ``file_stem``, ``source``, ``inferred``, ready
+    for batch submission.
+
+    Returns ``(cached_result, [])`` when a valid cached result exists.
+    """
+    repo = entry["repo"]
+    variant = entry["variant"]
+    binary = entry["binary"]
+    sname = safe_name(repo)
+
+    source_dir = Path(entry["source_dir"])
+    decomp_dir = Path(entry["decomp_dir"])
+    inference_dir = PRED_DIR / sname / variant / binary
+
+    results_dir = RESULTS_DIR / metric / sname / variant
+    results_path = results_dir / f"{binary}.json"
+
+    # Cache check (same logic as evaluate_binary)
+    if not force and results_path.exists():
+        try:
+            existing = json.loads(results_path.read_text())
+            stale = False
+            if existing.get("skipped_no_inference", 0) > 0:
+                inf_meta = inference_dir / "metadata.json"
+                if inf_meta.exists() and inf_meta.stat().st_mtime > results_path.stat().st_mtime:
+                    stale = True
+            if not stale:
+                return existing, []
+        except json.JSONDecodeError:
+            pass
+
+    source_manifest = json.loads((source_dir / "manifest.json").read_text())
+    decomp_manifest = json.loads((decomp_dir / "manifest.json").read_text())
+
+    source_by_stem = {}
+    for src_entry in source_manifest["functions"]:
+        stem = src_entry["file"].removesuffix(".go")
+        source_by_stem[stem] = src_entry
+
+    skipped_no_source = 0
+    skipped_no_inference = 0
+    work_items = []
+
+    for decomp_entry in decomp_manifest["functions"]:
+        file_stem = decomp_entry["file"].removesuffix(".c")
+
+        src_entry = source_by_stem.get(file_stem)
+        if src_entry is None:
+            skipped_no_source += 1
+            continue
+
+        source_file = source_dir / src_entry["file"]
+        if not source_file.exists():
+            skipped_no_source += 1
+            continue
+        source_code = source_file.read_text()
+
+        inference_file = inference_dir / f"{file_stem}.go"
+        if not inference_file.exists():
+            skipped_no_inference += 1
+            continue
+        inferred_code = inference_file.read_text()
+
+        work_items.append({
+            "file_stem": file_stem,
+            "source": source_code,
+            "inferred": inferred_code,
+        })
+
+    binary_meta = {
+        "repo": repo,
+        "variant": variant,
+        "binary": binary,
+        "metric": metric,
+        "skipped_no_source": skipped_no_source,
+        "skipped_no_inference": skipped_no_inference,
+        "results_dir": str(results_dir),
+        "results_path": str(results_path),
+    }
+
+    return binary_meta, work_items
+
+
+def submit_batch_evaluation(entries, metric_module, metric, force):
+    """Submit a batch job for evaluation (fire-and-forget).
+
+    Collects all work across binaries, calls submit_batch(), and saves
+    tracking information to pending_batches.json.  Does NOT wait for
+    results.
+    """
+    submit_fn = metric_module.submit_batch
+
+    # 1. Collect work from all binaries
+    print("Collecting work for batch evaluation...")
+    cached_results = []
+    binary_metas = []       # parallel with work_ranges
+    all_work_items = []     # flat list of work items across all binaries
+    work_ranges = []        # (start_idx, count) into all_work_items per binary
+
+    for entry in entries:
+        meta, items = _collect_binary_work(entry, metric, force)
+        if not items:
+            cached_results.append(meta)
+            continue
+        start = len(all_work_items)
+        for item in items:
+            item["key"] = f"k{len(all_work_items):06d}"
+            all_work_items.append(item)
+        work_ranges.append((start, len(items)))
+        binary_metas.append(meta)
+
+    if not all_work_items:
+        print("All binaries cached or have no comparable functions.")
+        return
+
+    print(f"Found {len(binary_metas)} binaries with {len(all_work_items)} "
+          f"functions to evaluate ({len(cached_results)} cached).")
+
+    # 2. Submit batch
+    job_name, uploaded_file = submit_fn(all_work_items)
+    if job_name is None:
+        return
+
+    # 3. Build key→file_stem mapping for later reassembly
+    key_stems = {}
+    for item in all_work_items:
+        key_stems[item["key"]] = item["file_stem"]
+
+    # 4. Save tracking entry
+    pending = _load_pending(metric)
+    pending.append({
+        "job_name": job_name,
+        "model": getattr(metric_module, "_model", "unknown"),
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "num_items": len(all_work_items),
+        "binary_metas": binary_metas,
+        "work_ranges": work_ranges,
+        "key_stems": key_stems,
+    })
+    _save_pending(metric, pending)
+
+    print(f"\nBatch job submitted: {job_name}")
+    print(f"Tracking {len(all_work_items)} comparisons across "
+          f"{len(binary_metas)} binaries.")
+    print("Run with --retrieve to check results later.")
+
+
+def retrieve_batch_results(metric_module, metric, aggregate_fn):
+    """Check all pending batch jobs and download completed results.
+
+    For each completed job, reassembles per-binary results and writes
+    the result JSONs.  Still-running jobs are kept in the tracker.
+    """
+    retrieve_fn = metric_module.retrieve_batch
+
+    pending = _load_pending(metric)
+    if not pending:
+        print("No pending batch jobs.")
+        return
+
+    print(f"Checking {len(pending)} pending batch job(s)...")
+    still_pending = []
+    all_results = []
+
+    for entry in pending:
+        job_name = entry["job_name"]
+        try:
+            scores_by_key = retrieve_fn(job_name)
+        except RuntimeError as e:
+            print(f"  FAILED: {e}")
+            # Drop failed/cancelled jobs from tracker
+            continue
+
+        if scores_by_key is None:
+            # Still running
+            still_pending.append(entry)
+            continue
+
+        # Reassemble per-binary results
+        binary_metas = entry["binary_metas"]
+        work_ranges = entry["work_ranges"]
+        key_stems = entry["key_stems"]
+
+        for bmeta, (start, count) in zip(binary_metas, work_ranges):
+            function_results = {}
+            for i in range(start, start + count):
+                key = f"k{i:06d}"
+                stem = key_stems[key]
+                function_results[stem] = scores_by_key.get(
+                    key, {"score": -1, "error": "missing_from_batch"},
+                )
+
+            all_scores = list(function_results.values())
+            agg = aggregate_fn(all_scores) if all_scores else aggregate_fn([])
+
+            result = {
+                "repo": bmeta["repo"],
+                "variant": bmeta["variant"],
+                "binary": bmeta["binary"],
+                "metric": metric,
+                "total_compared": len(function_results),
+                "skipped_no_source": bmeta["skipped_no_source"],
+                "skipped_no_inference": bmeta["skipped_no_inference"],
+                "aggregate": agg,
+                "functions": function_results,
+            }
+
+            results_dir = Path(bmeta["results_dir"])
+            results_path = Path(bmeta["results_path"])
+            results_dir.mkdir(parents=True, exist_ok=True)
+            results_path.write_text(json.dumps(result, indent=2))
+            all_results.append(result)
+
+        print(f"  {job_name}: completed, wrote {len(binary_metas)} result file(s).")
+
+    _save_pending(metric, still_pending)
+
+    if still_pending:
+        print(f"\n{len(still_pending)} job(s) still running.")
+    if all_results:
+        print(f"{len(all_results)} binary result(s) written.")
+        print_summary(all_results, aggregate_fn)
+
+
+# --------------------------------------------------------------------------- #
 #  Main
 # --------------------------------------------------------------------------- #
 
@@ -286,6 +541,10 @@ def main():
         "--force", action="store_true",
         help="Re-evaluate even if results exist",
     )
+    parser.add_argument(
+        "--retrieve", action="store_true",
+        help="Check pending batch jobs and download completed results",
+    )
 
     # Let the metric add its own CLI flags
     if hasattr(metric_module, "add_args"):
@@ -304,6 +563,11 @@ def main():
         print(f"Error loading metric '{args.metric}': {e}")
         sys.exit(1)
 
+    # --retrieve mode: check pending jobs, download completed results
+    if args.retrieve:
+        retrieve_batch_results(metric_module, args.metric, aggregate_fn)
+        return
+
     # Collect entries
     meta = load_metadata()
     entries = collect_entries(meta, args)
@@ -314,16 +578,26 @@ def main():
 
     print(f"Evaluating {len(entries)} binaries with metric={args.metric}")
 
-    results = []
-    for entry in tqdm(entries, desc="Evaluating", unit="bin"):
-        tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
-        result = evaluate_binary(
-            entry, compare_fn, aggregate_fn,
-            args.metric, args.force,
-        )
-        results.append(result)
+    # Use batch mode if the metric supports it and it wasn't disabled
+    use_batch = (hasattr(metric_module, "use_batch")
+                 and metric_module.use_batch()
+                 and hasattr(metric_module, "submit_batch"))
 
-    print_summary(results, aggregate_fn)
+    if use_batch:
+        submit_batch_evaluation(
+            entries, metric_module, args.metric, args.force,
+        )
+    else:
+        results = []
+        for entry in tqdm(entries, desc="Evaluating", unit="bin"):
+            tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
+            result = evaluate_binary(
+                entry, compare_fn, aggregate_fn,
+                args.metric, args.force,
+            )
+            results.append(result)
+
+        print_summary(results, aggregate_fn)
 
 
 if __name__ == "__main__":

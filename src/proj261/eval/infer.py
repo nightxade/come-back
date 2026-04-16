@@ -46,6 +46,27 @@ DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
 
 # --------------------------------------------------------------------------- #
+#  Pending-batch tracker
+# --------------------------------------------------------------------------- #
+
+def _pending_path() -> Path:
+    return PRED_DIR / "pending_batches.json"
+
+
+def _load_pending() -> list[dict]:
+    p = _pending_path()
+    if p.exists():
+        return json.loads(p.read_text())
+    return []
+
+
+def _save_pending(entries: list[dict]):
+    p = _pending_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(entries, indent=2))
+
+
+# --------------------------------------------------------------------------- #
 #  System prompts
 # --------------------------------------------------------------------------- #
 
@@ -313,8 +334,13 @@ def process_binary(
     return result
 
 
-def run_batch_inference(client, entries, args):
-    """Run inference using the Gemini Batch API."""
+def submit_batch_inference(client, entries, args):
+    """Submit a batch inference job (fire-and-forget).
+
+    Collects work, uploads binaries, builds JSONL, creates the batch job,
+    and saves tracking info to pending_batches.json.  Does NOT poll or
+    download results — use ``retrieve_batch_results`` for that.
+    """
     print(f"Collecting work for batch inference (model={args.model}, mode={args.mode})...")
 
     all_work = []
@@ -421,7 +447,7 @@ def run_batch_inference(client, entries, args):
 
         for rel_path, code_block in work["chunks"]:
             key = f"k{len(jsonl_lines):06d}"
-            key_map[key] = (binary_key, rel_path)
+            key_map[key] = [binary_key, rel_path]
 
             parts = []
             if args.mode in ("binary", "decomp+binary"):
@@ -440,7 +466,7 @@ def run_batch_inference(client, entries, args):
             }
             jsonl_lines.append(json.dumps(request_obj))
 
-    # 3. Upload JSONL
+    # 3. Upload JSONL and create batch job
     tmp_path = None
     jsonl_file = None
     try:
@@ -459,103 +485,160 @@ def run_batch_inference(client, entries, args):
         )
         print(f"Batch job created: {batch_job.name}")
 
-        # 5. Poll
-        start_time = time.time()
-        while True:
-            job = client.batches.get(name=batch_job.name)
-            status = job.state
-            elapsed = int(time.time() - start_time)
-
-            if status == "JOB_STATE_SUCCEEDED":
-                print(f"\nBatch job succeeded after {elapsed}s!")
-                break
-            elif status == "JOB_STATE_FAILED":
-                print(f"\nBatch job failed after {elapsed}s: {job.error}")
-                return
-            elif status == "JOB_STATE_CANCELLED":
-                print(f"\nBatch job cancelled after {elapsed}s.")
-                return
-
-            sys.stdout.write(f"\rStatus: {status} ({elapsed}s elapsed)...")
-            sys.stdout.flush()
-            time.sleep(min(60, 10 + elapsed // 10)) # Adaptive sleep
-
-        # 6. Process results
-        print("Downloading and processing results...")
-        output_file_name = job.output.file_name
-        content = client.files.download(name=output_file_name)
-
-        for line in content.decode().strip().split("\n"):
-            if not line: continue
-            res_obj = json.loads(line)
-            key = res_obj["key"]
-            binary_key, rel_path = key_map[key]
-
-            res_meta = binary_results[binary_key]
-            entry = next(w["entry"] for w in all_work if f"{w['entry']['repo']}|{w['entry']['variant']}|{w['entry']['binary']}" == binary_key)
-            out_dir = PRED_DIR / safe_name(entry["repo"]) / entry["variant"] / entry["binary"]
-            out_file = out_dir / f"{rel_path}.go"
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-
-            if "response" in res_obj:
-                resp = res_obj["response"]
-                try:
-                    text = ""
-                    for cand in resp.get("candidates", []):
-                        for part in cand.get("content", {}).get("parts", []):
-                            if "text" in part:
-                                text += part["text"]
-
-                    text = strip_code_fences(text)
-                    out_file.write_text(text)
-
-                    usage = resp.get("usageMetadata", {})
-                    in_tok = usage.get("promptTokenCount", 0)
-                    out_tok = usage.get("candidatesTokenCount", 0)
-
-                    res_meta["functions"][rel_path] = {
-                        "status": "ok",
-                        "input_tokens": in_tok,
-                        "output_tokens": out_tok,
-                    }
-                    res_meta["total_input_tokens"] += in_tok
-                    res_meta["total_output_tokens"] += out_tok
-                except Exception as e:
-                    print(f"Error processing {rel_path}: {e}")
-                    res_meta["functions"][rel_path] = {"status": "error", "error": str(e)}
-            else:
-                err = res_obj.get("status", {})
-                print(f"Function {rel_path} failed: {err.get('message', 'Unknown error')}")
-                res_meta["functions"][rel_path] = {"status": "error", "error": err.get("message")}
-
-        # 7. Finalize and write metadata
-        for binary_key, res_meta in binary_results.items():
-            statuses = {v["status"] for v in res_meta["functions"].values()}
-            if "error" in statuses:
-                res_meta["status"] = "partial"
-            else:
-                res_meta["status"] = "completed"
-
-            res_meta["finished_at"] = datetime.now(timezone.utc).isoformat()
-
-            entry = next(w["entry"] for w in all_work if f"{w['entry']['repo']}|{w['entry']['variant']}|{w['entry']['binary']}" == binary_key)
-            meta_path = PRED_DIR / safe_name(entry["repo"]) / entry["variant"] / entry["binary"] / "metadata.json"
-            meta_path.write_text(json.dumps(res_meta, indent=2))
-
     finally:
-        # Cleanup
+        # Clean up temp JSONL (local file + uploaded copy)
         if tmp_path and tmp_path.exists():
             tmp_path.unlink()
         if jsonl_file:
             try:
                 client.files.delete(name=jsonl_file.name)
-            except: pass
-        for up in uploaded_files.values():
-            try:
-                client.files.delete(name=up.name)
-            except: pass
+            except Exception:
+                pass
 
-    print_summary(list(binary_results.values()))
+    # 5. Save tracking entry
+    uploaded_binary_names = [uf.name for uf in uploaded_binaries.values()]
+
+    pending = _load_pending()
+    pending.append({
+        "job_name": batch_job.name,
+        "model": args.model,
+        "mode": args.mode,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "num_items": len(jsonl_lines),
+        "key_map": key_map,
+        "binary_results": binary_results,
+        "uploaded_binary_names": uploaded_binary_names,
+    })
+    _save_pending(pending)
+
+    print(f"\nBatch job submitted: {batch_job.name}")
+    print(f"Tracking {len(jsonl_lines)} requests across {len(all_work)} binaries.")
+    print("Run with --retrieve to check results later.")
+
+
+def retrieve_batch_results(client, args):
+    """Check all pending inference batch jobs and download completed results.
+
+    For completed jobs: download results JSONL, write .go files and
+    per-binary metadata.json, clean up uploaded binaries, remove from tracker.
+    For still-running jobs: keep in tracker, print status.
+    For failed/cancelled jobs: clean up, remove from tracker, report error.
+    """
+    pending = _load_pending()
+    if not pending:
+        print("No pending inference batch jobs.")
+        return
+
+    print(f"Checking {len(pending)} pending inference batch job(s)...")
+    still_pending = []
+    all_results = []
+
+    for tracker in pending:
+        job_name = tracker["job_name"]
+        job = client.batches.get(name=job_name)
+        status = job.state
+
+        if status == "JOB_STATE_SUCCEEDED":
+            print(f"  {job_name}: SUCCEEDED — downloading results...")
+
+            # Download results JSONL
+            output_file_name = job.output.file_name
+            content = client.files.download(name=output_file_name)
+
+            key_map = tracker["key_map"]
+            binary_results = tracker["binary_results"]
+
+            for line in content.decode().strip().split("\n"):
+                if not line:
+                    continue
+                res_obj = json.loads(line)
+                key = res_obj["key"]
+                binary_key, rel_path = key_map[key]
+
+                res_meta = binary_results[binary_key]
+                repo, variant, binary = binary_key.split("|", 2)
+                out_dir = PRED_DIR / safe_name(repo) / variant / binary
+                out_file = out_dir / f"{rel_path}.go"
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+
+                if "response" in res_obj:
+                    resp = res_obj["response"]
+                    try:
+                        text = ""
+                        for cand in resp.get("candidates", []):
+                            for part in cand.get("content", {}).get("parts", []):
+                                if "text" in part:
+                                    text += part["text"]
+
+                        text = strip_code_fences(text)
+                        out_file.write_text(text)
+
+                        usage = resp.get("usageMetadata", {})
+                        in_tok = usage.get("promptTokenCount", 0)
+                        out_tok = usage.get("candidatesTokenCount", 0)
+
+                        res_meta["functions"][rel_path] = {
+                            "status": "ok",
+                            "input_tokens": in_tok,
+                            "output_tokens": out_tok,
+                        }
+                        res_meta["total_input_tokens"] += in_tok
+                        res_meta["total_output_tokens"] += out_tok
+                    except Exception as e:
+                        print(f"    Error processing {rel_path}: {e}")
+                        res_meta["functions"][rel_path] = {"status": "error", "error": str(e)}
+                else:
+                    err = res_obj.get("status", {})
+                    print(f"    Function {rel_path} failed: {err.get('message', 'Unknown error')}")
+                    res_meta["functions"][rel_path] = {"status": "error", "error": err.get("message")}
+
+            # Finalize and write per-binary metadata
+            for binary_key, res_meta in binary_results.items():
+                statuses = {v["status"] for v in res_meta["functions"].values()}
+                if "error" in statuses:
+                    res_meta["status"] = "partial"
+                else:
+                    res_meta["status"] = "completed"
+
+                res_meta["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+                repo, variant, binary = binary_key.split("|", 2)
+                meta_path = PRED_DIR / safe_name(repo) / variant / binary / "metadata.json"
+                meta_path.parent.mkdir(parents=True, exist_ok=True)
+                meta_path.write_text(json.dumps(res_meta, indent=2))
+                all_results.append(res_meta)
+
+            # Clean up uploaded binaries
+            for up_name in tracker.get("uploaded_binary_names", []):
+                try:
+                    client.files.delete(name=up_name)
+                except Exception:
+                    pass
+
+        elif status in ("JOB_STATE_FAILED", "JOB_STATE_CANCELLED"):
+            print(f"  {job_name}: {status}")
+            if hasattr(job, "error") and job.error:
+                print(f"    Error: {job.error}")
+
+            # Clean up uploaded binaries
+            for up_name in tracker.get("uploaded_binary_names", []):
+                try:
+                    client.files.delete(name=up_name)
+                except Exception:
+                    pass
+
+        else:
+            # Still running
+            print(f"  {job_name}: {status} ({tracker['num_items']} items)")
+            still_pending.append(tracker)
+
+    _save_pending(still_pending)
+
+    if still_pending:
+        print(f"\n{len(still_pending)} job(s) still running.")
+    if all_results:
+        print(f"{len(all_results)} binary result(s) written.")
+        print_summary(all_results)
 
 
 # --------------------------------------------------------------------------- #
@@ -647,6 +730,8 @@ def main():
                         help=f"Gemini model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--no-batch", action="store_true",
                         help="Use synchronous API instead of Batch API")
+    parser.add_argument("--retrieve", action="store_true",
+                        help="Check pending batch jobs and download completed results")
     args = parser.parse_args()
 
     # Load API key
@@ -658,12 +743,17 @@ def main():
 
     client = genai.Client(api_key=api_key)
 
+    # --retrieve mode: check pending jobs, download completed results
+    if args.retrieve:
+        retrieve_batch_results(client, args)
+        return
+
     # Collect work
     meta = load_metadata()
     entries = collect_entries(meta, args.mode, args)
 
     if not args.no_batch:
-        run_batch_inference(client, entries, args)
+        submit_batch_inference(client, entries, args)
         return
 
     # Synchronous mode (filtered for resumability)

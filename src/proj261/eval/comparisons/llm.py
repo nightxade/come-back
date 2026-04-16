@@ -3,12 +3,17 @@
 Asks the model to rate semantic similarity between the original Go source
 and the inferred Go source on a 0--10 scale.  Optionally includes an
 explanation alongside the score.
+
+Supports both synchronous (one call per function) and Gemini Batch API
+modes.  Batch mode is the default; pass ``--no-batch`` to use sync.
 """
 
 import json
 import os
 import re
+import tempfile
 import time
+from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
@@ -24,6 +29,7 @@ from proj261.util import PROJECT_DIR, DEFAULT_MODEL
 _client: genai.Client | None = None
 _model: str = DEFAULT_MODEL
 _explain: bool = False
+_no_batch: bool = False
 
 RETRY_BASE = 2
 RETRY_MULT = 2
@@ -138,11 +144,15 @@ def add_args(parser):
         "--model", type=str, default=DEFAULT_MODEL,
         help=f"Gemini model for LLM judge (default: {DEFAULT_MODEL})",
     )
+    parser.add_argument(
+        "--no-batch", action="store_true",
+        help="Use synchronous API instead of Batch API",
+    )
 
 
 def configure(args):
     """Initialize the Gemini client and store settings."""
-    global _client, _model, _explain
+    global _client, _model, _explain, _no_batch
 
     load_dotenv(PROJECT_DIR / ".env")
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -154,6 +164,7 @@ def configure(args):
     _client = genai.Client(api_key=api_key)
     _model = args.model
     _explain = args.explain
+    _no_batch = getattr(args, "no_batch", False)
 
 
 def compare_functions(
@@ -192,3 +203,134 @@ def aggregate(results: list[dict]) -> dict:
         return {"mean_score": 0.0, "num_scored": 0, "num_errors": errors}
     mean = sum(r["score"] for r in valid) / len(valid)
     return {"mean_score": round(mean, 4), "num_scored": len(valid), "num_errors": errors}
+
+
+# --------------------------------------------------------------------------- #
+#  Batch API support
+# --------------------------------------------------------------------------- #
+
+def use_batch() -> bool:
+    """Return True if batch mode should be used (default unless --no-batch)."""
+    return not _no_batch
+
+
+def submit_batch(work_items):
+    """Build JSONL, upload, and create a Gemini batch job.
+
+    *work_items* is a list of dicts, each with:
+        - ``key``          : unique string identifying this comparison
+        - ``source``       : original Go source code
+        - ``inferred``     : inferred Go source code
+
+    Returns ``(job_name, uploaded_file_name)`` on success.
+    """
+    if not work_items:
+        print("No work items for batch comparison.")
+        return None, None
+
+    system = _SYSTEM_WITH_EXPLANATION if _explain else _SYSTEM_SCORE_ONLY
+
+    # 1. Build JSONL
+    print(f"Preparing batch request JSONL ({len(work_items)} comparisons)...")
+    jsonl_lines = []
+    for item in work_items:
+        prompt = _build_prompt(item["source"], item["inferred"])
+        request_obj = {
+            "key": item["key"],
+            "request": {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "systemInstruction": {"parts": [{"text": system}]},
+                "generationConfig": {
+                    "maxOutputTokens": 1024,
+                    "temperature": 0.0,
+                },
+            },
+        }
+        jsonl_lines.append(json.dumps(request_obj))
+
+    # 2. Upload JSONL and submit batch job
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
+            tmp.write("\n".join(jsonl_lines) + "\n")
+            tmp_path = Path(tmp.name)
+
+        print("Uploading batch requests file...")
+        uploaded_file = _client.files.upload(
+            path=tmp_path,
+            config=types.UploadFileConfig(display_name="llm_judge_batch.jsonl"),
+        )
+
+        print(f"Submitting batch job (model={_model})...")
+        batch_job = _client.batches.create(model=_model, src=uploaded_file.name)
+        print(f"Batch job created: {batch_job.name}")
+
+        return batch_job.name, uploaded_file.name
+
+    finally:
+        if tmp_path and Path(tmp_path).exists():
+            Path(tmp_path).unlink()
+
+
+def retrieve_batch(job_name):
+    """Check a batch job and return results if complete.
+
+    Returns:
+        - ``dict[key, scores]`` if the job succeeded.
+        - ``None`` if the job is still running.
+        - Raises ``RuntimeError`` if the job failed or was cancelled.
+    """
+    job = _client.batches.get(name=job_name)
+    status = job.state
+
+    if status == "JOB_STATE_SUCCEEDED":
+        print(f"Batch job {job_name} succeeded, downloading results...")
+        output_file_name = job.output.file_name
+        content = _client.files.download(name=output_file_name)
+
+        scores_by_key: dict[str, dict] = {}
+        for line in content.decode().strip().split("\n"):
+            if not line:
+                continue
+            res_obj = json.loads(line)
+            key = res_obj["key"]
+
+            if "response" not in res_obj:
+                err = res_obj.get("status", {})
+                scores_by_key[key] = {
+                    "score": -1,
+                    "error": err.get("message", "batch_error"),
+                }
+                continue
+
+            resp = res_obj["response"]
+            text = ""
+            for cand in resp.get("candidates", []):
+                for part in cand.get("content", {}).get("parts", []):
+                    if "text" in part:
+                        text += part["text"]
+
+            parsed = _parse_response(text)
+            if parsed is None:
+                scores_by_key[key] = {"score": -1, "error": "parse_failed", "raw": text}
+                continue
+
+            score_val = parsed.get("score")
+            if not isinstance(score_val, (int, float)) or score_val < 0 or score_val > 10:
+                scores_by_key[key] = {"score": -1, "error": "invalid_score", "raw": text}
+                continue
+
+            result = {"score": score_val / 10.0}
+            if _explain:
+                result["explanation"] = parsed.get("explanation", "")
+            scores_by_key[key] = result
+
+        return scores_by_key
+
+    if status in ("JOB_STATE_FAILED", "JOB_STATE_CANCELLED"):
+        error_msg = getattr(job, "error", status)
+        raise RuntimeError(f"Batch job {job_name} {status}: {error_msg}")
+
+    # Still running
+    print(f"Batch job {job_name}: {status}")
+    return None
