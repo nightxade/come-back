@@ -29,8 +29,6 @@ from tqdm import tqdm
 
 GHIDRA_INSTALL = Path(os.environ.get("GHIDRA_INSTALL_DIR", "/opt/ghidra"))
 
-FUNC_DECOMPILE_TIMEOUT = 600   # seconds per function decompilation (10 min)
-ANALYSIS_TIMEOUT = 3600        # seconds for full binary analysis (60 min)
 MAX_STRING_DISPLAY_LEN = 200   # truncate long packed strings in annotations
 
 # Regex to find string-related symbol references in decompiled C code.
@@ -771,7 +769,7 @@ def decompile_program(program, output_path: Path) -> bool:
         with open(output_path, "w") as f:
             for func in functions:
                 result = decompiler.decompileFunction(
-                    func, FUNC_DECOMPILE_TIMEOUT, monitor,
+                    func, 0, monitor,
                 )
                 decomp = result.getDecompiledFunction()
                 if decomp is not None:
@@ -828,7 +826,7 @@ def process_binary(project, binary_path: Path, output_path: Path, variant: str =
     import pyghidra
 
     program_name = binary_path.name
-    monitor = pyghidra.task_monitor(timeout=ANALYSIS_TIMEOUT)
+    monitor = pyghidra.task_monitor()
 
     try:
         # Load the binary into the project
