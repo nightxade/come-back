@@ -949,8 +949,10 @@ def main():
     )
     parser.add_argument("--repo", type=str, nargs="*", default=None,
                         help="Decompile binaries for specific repo(s) only (e.g. ollama/ollama)")
-    parser.add_argument("--variant", type=str, default=None,
-                        help="Only decompile a specific variant (default, debug, stripped)")
+    parser.add_argument("--variant", type=str, nargs="+", default=None,
+                        help="Only decompile specific variant(s) (default, debug, stripped)")
+    parser.add_argument("--binaries", type=str, nargs="+", default=None,
+                        help="Only decompile specific binary names (requires exactly one --repo)")
     parser.add_argument("--force", action="store_true",
                         help="Re-decompile even if output already exists")
     parser.add_argument("--max-repos", type=int, default=None,
@@ -967,11 +969,17 @@ def main():
         global GHIDRA_INSTALL
         GHIDRA_INSTALL = Path(args.ghidra_dir)
 
+    if args.binaries and (not args.repo or len(args.repo) != 1):
+        parser.error("--binaries requires exactly one --repo")
+
     meta = load_metadata()
     entries = collect_binaries(meta, args.repo)
 
     if args.variant:
-        entries = [e for e in entries if e["variant"] == args.variant]
+        entries = [e for e in entries if e["variant"] in args.variant]
+
+    if args.binaries:
+        entries = [e for e in entries if e["binary_path"].name in args.binaries]
 
     if not args.force:
         entries = [
