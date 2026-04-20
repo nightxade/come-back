@@ -298,10 +298,18 @@ def main():
         description="Map compiled Go binaries to their source files.",
     )
     parser.add_argument("--repo", type=str, nargs="*", default=None, help="Map specific repo(s) only (e.g. ollama/ollama)")
+    parser.add_argument("--force", action="store_true", help="Regenerate mappings even if they already exist")
     args = parser.parse_args()
 
     meta = load_metadata()
     smap = load_source_map()
+
+    if args.force and args.repo:
+        # Remove existing entries for the specified repos so they get regenerated
+        smap["mappings"] = [m for m in smap["mappings"] if m["repo"] not in args.repo]
+    elif args.force:
+        smap["mappings"] = []
+
     done = existing_keys(smap)
     goroot = get_goroot()
 

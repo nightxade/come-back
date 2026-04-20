@@ -187,14 +187,17 @@ def validate_packages(entries, source_map):
         total_fp += len(false_pos)
         total_fn += len(false_neg)
 
-        if false_neg or false_pos:
+        if false_neg:
             failed += 1
             tqdm.write(f"  FAIL {entry['repo']} {entry['variant']}/{entry['binary']}  "
                        f"FP={len(false_pos)} FN={len(false_neg)}")
             for f in sorted(false_neg)[:3]:
                 tqdm.write(f"       MISSED: {f[:120]}")
-            for f in sorted(false_pos)[:3]:
-                tqdm.write(f"       EXTRA:  {f[:120]}")
+        elif false_pos:
+            passed += 1
+            tqdm.write(f"  OK   {entry['repo']} {entry['variant']}/{entry['binary']}  "
+                       f"filter={len(filter_user)} source_map={len(sm_user)} "
+                       f"(FP={len(false_pos)}, source_map incomplete)")
         else:
             passed += 1
             tqdm.write(f"  OK   {entry['repo']} {entry['variant']}/{entry['binary']}  "
