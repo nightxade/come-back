@@ -748,6 +748,9 @@ def decompile_program(program, output_path: Path) -> bool:
     listing the resolved values of any ``PTR_s_*`` / ``s_*`` symbols
     referenced in its decompiled C code.
 
+    Writes a sidecar ``<binary>.meta.json`` next to the output with
+    decompilation statistics and any functions that hit the timeout.
+
     Returns True on success.
     """
     import pyghidra
@@ -764,18 +767,32 @@ def decompile_program(program, output_path: Path) -> bool:
     decompiler.openProgram(program)
     monitor = pyghidra.task_monitor()
 
+    timed_out = []
+    decompiled_count = 0
+    total_count = 0
+
     try:
         functions = list(program.getFunctionManager().getFunctions(True))
+        total_count = len(functions)
         with open(output_path, "w") as f:
             for func in functions:
                 result = decompiler.decompileFunction(
-                    func, 0, monitor,
+                    func, 600, monitor,
                 )
+
+                if not result.decompileCompleted():
+                    fname = func.getName()
+                    addr = func.getEntryPoint().toString()
+                    timed_out.append({"name": fname, "address": addr})
+                    tqdm.write(f"    TIMEOUT: {fname} @ {addr}")
+                    continue
+
                 decomp = result.getDecompiledFunction()
                 if decomp is not None:
                     c_code = decomp.getC()
                     if c_code:
                         c_str = str(c_code)
+                        decompiled_count += 1
                         f.write(f"// Function: {func.getName()}\n")
 
                         # Resolve any symbols the data-item pass missed
@@ -810,6 +827,17 @@ def decompile_program(program, output_path: Path) -> bool:
                         f.write("\n")
     finally:
         decompiler.dispose()
+
+    # Write sidecar metadata
+    meta_path = output_path.with_suffix(".meta.json")
+    meta_path.write_text(json.dumps({
+        "total_functions": total_count,
+        "decompiled": decompiled_count,
+        "timed_out": timed_out,
+    }, indent=2) + "\n")
+
+    if timed_out:
+        tqdm.write(f"    {len(timed_out)} function(s) hit decompilation timeout")
 
     return output_path.exists() and output_path.stat().st_size > 0
 
