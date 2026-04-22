@@ -87,6 +87,29 @@ def run_goresym(binary_path: Path) -> dict | None:
         return None
 
 
+def get_module_path(binary_path: Path) -> str | None:
+    """Extract the Go module path from a compiled binary via `go version -m`."""
+    try:
+        r = subprocess.run(
+            ["go", "version", "-m", str(binary_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "mod":
+            return parts[1]
+    return None
+
+
+def is_user_func(name: str, module_path: str) -> bool:
+    """Check if a function name belongs to the user's module."""
+    if name.startswith("main."):
+        return True
+    return name.startswith(module_path + "/") or name.startswith(module_path + ".")
+
+
 def _sanitize_ghidra_name(name: str) -> str:
     """Replace characters that Ghidra rejects in symbol names.
 
@@ -740,13 +763,17 @@ def _escape_annotation(s: str) -> str:
 #  Core
 # --------------------------------------------------------------------------- #
 
-def decompile_program(program, output_path: Path) -> bool:
+def decompile_program(program, output_path: Path, module_path: str | None = None) -> bool:
     """Decompile all functions in an already-analyzed program.
 
     Uses DecompInterface directly — no script runner overhead.
     Each function is annotated with a ``// Strings:`` comment block
     listing the resolved values of any ``PTR_s_*`` / ``s_*`` symbols
     referenced in its decompiled C code.
+
+    If *module_path* is provided, only functions belonging to the user's
+    module (or ``main.*``) are decompiled — stdlib, runtime, and external
+    dependency functions are skipped.
 
     Writes a sidecar ``<binary>.meta.json`` next to the output with
     decompilation statistics and any functions that hit the timeout.
@@ -767,8 +794,9 @@ def decompile_program(program, output_path: Path) -> bool:
     decompiler.openProgram(program)
     monitor = pyghidra.task_monitor()
 
-    timed_out = []
+    failed_funcs = []
     decompiled_count = 0
+    skipped_count = 0
     total_count = 0
 
     try:
@@ -776,6 +804,12 @@ def decompile_program(program, output_path: Path) -> bool:
         total_count = len(functions)
         with open(output_path, "w") as f:
             for func in functions:
+                fname = func.getName()
+
+                if module_path and not is_user_func(fname, module_path):
+                    skipped_count += 1
+                    continue
+
                 result = decompiler.decompileFunction(
                     func, 600, monitor,
                 )
@@ -783,8 +817,16 @@ def decompile_program(program, output_path: Path) -> bool:
                 if not result.decompileCompleted():
                     fname = func.getName()
                     addr = func.getEntryPoint().toString()
-                    timed_out.append({"name": fname, "address": addr})
-                    tqdm.write(f"    TIMEOUT: {fname} @ {addr}")
+                    err = str(result.getErrorMessage() or "unknown").strip()
+                    is_timeout = "timeout" in err.lower() or "Didn't finish" in err
+                    reason = "timeout" if is_timeout else err
+                    failed_funcs.append({
+                        "name": fname,
+                        "address": addr,
+                        "reason": reason,
+                    })
+                    label = "TIMEOUT" if is_timeout else "DECOMP FAIL"
+                    tqdm.write(f"    {label}: {fname} @ {addr} -- {reason}")
                     continue
 
                 decomp = result.getDecompiledFunction()
@@ -830,14 +872,23 @@ def decompile_program(program, output_path: Path) -> bool:
 
     # Write sidecar metadata
     meta_path = output_path.with_suffix(".meta.json")
+    timeouts = [f for f in failed_funcs if f["reason"] == "timeout"]
+    errors = [f for f in failed_funcs if f["reason"] != "timeout"]
     meta_path.write_text(json.dumps({
+        "module_path": module_path,
         "total_functions": total_count,
         "decompiled": decompiled_count,
-        "timed_out": timed_out,
+        "skipped": skipped_count,
+        "timed_out": timeouts,
+        "errors": errors,
     }, indent=2) + "\n")
 
-    if timed_out:
-        tqdm.write(f"    {len(timed_out)} function(s) hit decompilation timeout")
+    if skipped_count:
+        tqdm.write(f"    Skipped {skipped_count} non-user functions")
+    if timeouts:
+        tqdm.write(f"    {len(timeouts)} function(s) hit decompilation timeout")
+    if errors:
+        tqdm.write(f"    {len(errors)} function(s) failed decompilation")
 
     return output_path.exists() and output_path.stat().st_size > 0
 
@@ -864,6 +915,13 @@ def process_binary(project, binary_path: Path, output_path: Path, variant: str =
         with loader.load() as load_results:
             load_results.save(monitor)
 
+        # Get module path for user-function filtering
+        mod_path = get_module_path(binary_path)
+        if mod_path:
+            tqdm.write(f"    Module: {mod_path}")
+        else:
+            tqdm.write("    WARNING: could not determine module path; decompiling all functions")
+
         # Open, analyze, decompile
         with pyghidra.program_context(project, f"/{program_name}") as program:
             goresym_data = run_goresym(binary_path)
@@ -871,7 +929,10 @@ def process_binary(project, binary_path: Path, output_path: Path, variant: str =
                 renamed, created = inject_goresym_symbols(program, goresym_data)
                 tqdm.write(f"    GoReSym: renamed {renamed}, created {created} functions")
             pyghidra.analyze(program, monitor)
-            ok = decompile_program(program, output_path)
+            partial_marker = output_path.with_suffix(".partial")
+            partial_marker.touch()
+            ok = decompile_program(program, output_path, module_path=mod_path)
+            partial_marker.unlink(missing_ok=True)
 
         # Remove program from project to free disk / memory
         domain_file = project.getProjectData().getFile(f"/{program_name}")
@@ -1012,7 +1073,9 @@ def main():
     if not args.force:
         entries = [
             e for e in entries
-            if not (e["output_path"].exists() and e["output_path"].stat().st_size > 0)
+            if not (e["output_path"].with_suffix(".meta.json").exists()
+                    or (e["output_path"].exists() and e["output_path"].stat().st_size > 0
+                        and not e["output_path"].with_suffix(".partial").exists()))
         ]
 
     if args.max_size:

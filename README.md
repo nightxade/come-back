@@ -4,7 +4,7 @@ LLM-enhanced decompiler from compiled Go binaries back to source code. The pipel
 
 ## Setup
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Go, and [Ghidra](https://ghidra-sre.org/) (for decompilation). Optional: [GoReSym](https://github.com/mandiant/GoReSym) (for stripped binary symbol recovery).
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Go, and [Ghidra](https://ghidra-sre.org/) (for decompilation). Optional: [GoReSym](https://github.com/mandiant/GoReSym) (for symbol recovery from Go's `pclntab`).
 
 ```bash
 uv sync
@@ -25,7 +25,10 @@ data/
 ├── source_map.json         # Binary→source file mappings (written by map-sources)
 ├── repos/{owner__repo}/    # Cloned Go repositories
 ├── binaries/{owner__repo}/{variant}/{binary}   # Compiled binaries
-├── decomps/{owner__repo}/{variant}/{binary}.c  # Ghidra decompilation output
+├── decomps/{owner__repo}/{variant}/
+│   ├── {binary}.c                              # Ghidra decompilation output
+│   ├── {binary}.meta.json                      # Decompilation metadata sidecar
+│   └── {binary}.partial                        # Marker for incomplete decompilations (removed on success)
 ├── decomps_filtered/{owner__repo}/{variant}/{binary}.c  # Filtered (user-only) decomps
 ├── decomps_chunked/{owner__repo}/{variant}/{binary}/    # Per-function decomp files
 │   ├── {package}/{function}.c
@@ -35,9 +38,11 @@ data/
     └── manifest.json
 
 out/
-├── pred/{owner__repo}/{variant}/{binary}/
-│   ├── metadata.json       # Inference metadata (mode, model, tokens, per-function status)
-│   └── {package}/{function}.go  # Per-function recovered Go source
+├── pred/
+│   ├── pending_batches.json    # Tracks submitted batch jobs awaiting retrieval
+│   └── {owner__repo}/{variant}/{binary}/
+│       ├── metadata.json       # Inference metadata (mode, model, tokens, per-function status)
+│       └── {package}/{function}.go  # Per-function recovered Go source
 └── results/{metric}/{owner__repo}/{variant}/{binary}.json  # Evaluation results
 ```
 
@@ -65,23 +70,38 @@ Uses `go list -deps -json` to record which source files end up in each binary.
 ```bash
 uv run map-sources
 uv run map-sources --repo ollama/ollama
+uv run map-sources --repo ollama/ollama --force   # regenerate mappings for this repo
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--repo` | Filter to a specific repo |
+| `--force` | Drop existing entries for specified repos (or all) and regenerate |
 
 ### 3. Decompile binaries with Ghidra
 
-Runs Ghidra's decompiler on each binary via PyGhidra. Outputs one `.c` file per binary with `// Function: {name}` markers. For `stripped` binaries, [GoReSym](https://github.com/mandiant/GoReSym) is automatically invoked (if installed) to recover function names and boundaries from Go's `pclntab` before Ghidra's auto-analysis, restoring real Go symbol names that would otherwise be lost.[^1]
+Runs Ghidra's decompiler on each binary via PyGhidra. Outputs one `.c` file per binary with `// Function: {name}` markers. [GoReSym](https://github.com/mandiant/GoReSym) is automatically invoked (if installed) on **all variants** to recover function names and boundaries from Go's `pclntab` before Ghidra's auto-analysis — Ghidra sometimes misses user functions that GoReSym recovers, even in unstripped binaries.[^1]
+
+Before decompiling, the module path is extracted from each binary via `go version -m`. Only functions belonging to the user's module (or `main.*`) are decompiled — stdlib, runtime, and external dependency functions are skipped. This eliminates 80–99% of decompilation work and avoids Ghidra decompiler errors on complex runtime functions.
+
+Ghidra analysis runs without a timeout (so large binaries complete fully). Individual functions get a 600-second decompilation timeout; functions that exceed this are skipped and logged. The decompiler distinguishes real timeouts from instant Ghidra failures (e.g. locked varnode errors).
+
+A sidecar `<binary>.meta.json` is written alongside each `.c` file with decompilation statistics: `total_functions`, `decompiled`, `skipped`, `timed_out`, `errors`, and `module_path`. A `.partial` marker file tracks incomplete decompilations — without `--force`, the skip logic checks for `.meta.json` (new-format complete) or `.c` without `.partial` (legacy complete), and re-runs interrupted decomps.
 
 ```bash
 uv run decompile
 uv run decompile --repo ollama/ollama --variant default
+uv run decompile --repo ollama/ollama --variant default stripped
+uv run decompile --repo ollama/ollama --binaries chat ollama
 uv run decompile --max-repos 10 --max-size 200 --threads 4
 uv run decompile --force   # re-decompile existing outputs
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--repo` | Filter to a specific repo (e.g. `ollama/ollama`) |
-| `--variant` | Filter to a build variant (`default`, `debug`, `stripped`) |
+| `--repo` | Filter to specific repo(s) (e.g. `ollama/ollama`) |
+| `--variant` | Filter to build variant(s); accepts multiple values (e.g. `default stripped`) |
+| `--binaries` | Decompile specific binary names only (requires exactly one `--repo`) |
 | `--max-repos` | Limit number of repos |
 | `--max-size` | Skip binaries larger than N MB |
 | `--threads` | Parallel worker processes (default: 1) |
@@ -89,7 +109,9 @@ uv run decompile --force   # re-decompile existing outputs
 
 ### 4. Filter decomps to user-only functions
 
-Raw Ghidra decomps include all functions (stdlib, runtime, external deps) and are typically too large for LLM context windows (e.g. 24 MB, ~7000 functions for a single binary). This step extracts the Go module path from each binary via `go version -m` and keeps only functions belonging to the user's module, reducing output by 80--99%.
+**Note:** New decompilations (with `.meta.json` sidecars) are already pre-filtered to user functions at decompile time. This step is only needed for legacy decomps that contain all functions, or as a standalone re-filter tool.
+
+Extracts the Go module path from each binary via `go version -m` and keeps only functions belonging to the user's module, reducing output by 80–99%.
 
 ```bash
 uv run filter-decomps
@@ -162,9 +184,11 @@ uv run validate-filter --variant default
 
 Deep validation distinguishes between filter bugs (function is in the raw decomp but missing from the filtered one) and Ghidra limitations (function is in the binary but Ghidra failed to decompile it).
 
+False positives (filter includes a function not in `source_map.json`) are informational — they happen when the source map has incomplete package coverage, which is expected. Only false negatives (filter misses a real user function) are treated as failures.
+
 ### 8. LLM inference with Gemini
 
-Sends Ghidra decompilations and/or raw binaries to Gemini to recover Go source code. Uses the Batch API by default for efficiency.
+Sends Ghidra decompilations and/or raw binaries to Gemini to recover Go source code. Uses the Batch API by default in a fire-and-forget pattern: `submit_batch_inference` uploads work and records the job in `pending_batches.json`, and `retrieve_batch_results` polls for completed jobs and downloads results. This allows submitting large batch jobs and retrieving results later.
 
 ```bash
 uv run infer --mode decomp --repo ollama/ollama
@@ -172,11 +196,12 @@ uv run infer --mode decomp+binary --max-repos 5
 uv run infer --mode binary --variant default
 uv run infer --mode decomp --max-calls 100
 uv run infer --mode decomp --no-batch --threads 4   # synchronous mode
+uv run infer --retrieve                              # check pending jobs and download results
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--mode` | **Required.** `decomp`, `binary`, or `decomp+binary` |
+| `--mode` | **Required** (except with `--retrieve`). `decomp`, `binary`, or `decomp+binary` |
 | `--repo` | Filter to a specific repo |
 | `--variant` | Filter to a build variant |
 | `--max-repos` | Limit number of repos |
@@ -186,6 +211,7 @@ uv run infer --mode decomp --no-batch --threads 4   # synchronous mode
 | `--force` | Re-run even if output exists |
 | `--model` | Gemini model (default: `gemini-3.1-flash-lite`) |
 | `--no-batch` | Use synchronous API instead of Batch API |
+| `--retrieve` | Check pending batch jobs and download completed results |
 
 Modes:
 - **decomp** — sends only the Ghidra `.c` decompilation
@@ -258,4 +284,4 @@ uv run count-tokens data/decomps/ollama__ollama/default/chat.c
 uv run count-tokens data/binaries/ollama__ollama/default/chat --model gemini-2.0-flash-lite
 ```
 
-[^1]: **Stripped binaries.** Stripped Go binaries (`-ldflags="-s -w"`) lose their ELF symbol table and DWARF info, but Go's `pclntab` (program counter line table) survives because the runtime needs it. GoReSym parses `pclntab` to recover function names and boundaries, which are injected into Ghidra before auto-analysis. This restores real Go symbol names (e.g. `github.com/ollama/ollama/api.Func` instead of `FUN_004a1000`), enabling the downstream filter and chunk pipeline to classify them by module path. If GoReSym is not installed, the decompiler degrades gracefully and continues with Ghidra's default `FUN_` names. Note: Ghidra's decompilation of stripped Go binaries is still limited — in our testing it produced output for only ~55% of functions compared to unstripped builds, even with correct boundaries from GoReSym. The bottleneck is Ghidra's decompiler (lacking type info), not symbol recovery.
+[^1]: **GoReSym symbol recovery.** GoReSym now runs on **all variants** (default, debug, stripped), not just stripped binaries. Go's `pclntab` (program counter line table) survives even in stripped binaries because the runtime needs it. GoReSym parses `pclntab` to recover function names and boundaries, which are injected into Ghidra before auto-analysis. This restores real Go symbol names (e.g. `github.com/ollama/ollama/api.Func` instead of `FUN_004a1000`), enabling the downstream filter and chunk pipeline to classify them by module path. Running GoReSym on unstripped binaries is also valuable because Ghidra sometimes misses user functions that GoReSym recovers from `pclntab`. If GoReSym is not installed, the decompiler degrades gracefully and continues with Ghidra's default `FUN_` names. Note: Ghidra's decompilation of stripped Go binaries is still limited — in our testing it produced output for only ~55% of functions compared to unstripped builds, even with correct boundaries from GoReSym. The bottleneck is Ghidra's decompiler (lacking type info), not symbol recovery.
