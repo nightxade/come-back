@@ -930,6 +930,7 @@ def process_binary(project, binary_path: Path, output_path: Path, variant: str =
                 tqdm.write(f"    GoReSym: renamed {renamed}, created {created} functions")
             pyghidra.analyze(program, monitor)
             partial_marker = output_path.with_suffix(".partial")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             partial_marker.touch()
             ok = decompile_program(program, output_path, module_path=mod_path)
             partial_marker.unlink(missing_ok=True)
