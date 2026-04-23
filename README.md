@@ -258,9 +258,9 @@ Then run it with `--metric <name>`. Metrics may also define optional `add_args(p
 uv run compare --metric codebleu --repo ollama/ollama
 ```
 
-Per-function results include `score`, `ngram_match`, `weighted_ngram_match`, `syntax_match`, and `dataflow_match`.
+Per-function results include `score`, `ngram_match`, `weighted_ngram_match`, `syntax_match`, `dataflow_match`, and `source_len` (character count of the original Go source). Aggregates report both unweighted means (`mean_score`, etc.) and source-length-weighted means (`weighted_score`, etc.), so larger/more complex functions have proportionally more influence on the weighted aggregate.
 
-**`llm`** — LLM-as-a-judge via the Gemini API. Asks the model to rate semantic similarity between original and inferred code on a 0–10 scale (normalized to 0–1). Requires `GEMINI_API_KEY`.
+**`llm`** — LLM-as-a-judge via the Gemini API. Asks the model to rate semantic similarity between original and inferred code on a 0–10 scale (normalized to 0–1). Requires `GEMINI_API_KEY`. Aggregates report both `mean_score` and `weighted_score` (weighted by source length); error results are excluded from both.
 
 ```bash
 uv run compare --metric llm --repo ollama/ollama

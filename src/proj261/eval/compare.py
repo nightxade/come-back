@@ -107,6 +107,28 @@ def collect_entries(meta: dict, args) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+#  Backfill source_len into cached results
+# --------------------------------------------------------------------------- #
+
+def _backfill_source_len(result: dict, source_dir: Path) -> bool:
+    """Inject source_len into per-function results that lack it.
+
+    Reads the source .go file for each function stem and sets
+    source_len = len(contents).  Returns True if any values were added.
+    """
+    functions = result.get("functions", {})
+    changed = False
+    for stem, fres in functions.items():
+        if "source_len" in fres:
+            continue
+        src_file = source_dir / f"{stem}.go"
+        if src_file.exists():
+            fres["source_len"] = len(src_file.read_text())
+            changed = True
+    return changed
+
+
+# --------------------------------------------------------------------------- #
 #  Per-binary evaluation
 # --------------------------------------------------------------------------- #
 
@@ -140,6 +162,10 @@ def evaluate_binary(entry, compare_fn, aggregate_fn, metric, force):
                 if inf_meta.exists() and inf_meta.stat().st_mtime > results_path.stat().st_mtime:
                     stale = True
             if not stale:
+                if _backfill_source_len(existing, source_dir):
+                    all_scores = list(existing.get("functions", {}).values())
+                    existing["aggregate"] = aggregate_fn(all_scores) if all_scores else aggregate_fn([])
+                    results_path.write_text(json.dumps(existing, indent=2))
                 return existing
         except json.JSONDecodeError:
             pass
@@ -300,6 +326,8 @@ def _collect_binary_work(entry, metric, force):
                 if inf_meta.exists() and inf_meta.stat().st_mtime > results_path.stat().st_mtime:
                     stale = True
             if not stale:
+                if _backfill_source_len(existing, source_dir):
+                    results_path.write_text(json.dumps(existing, indent=2))
                 return existing, []
         except json.JSONDecodeError:
             pass
@@ -356,7 +384,7 @@ def _collect_binary_work(entry, metric, force):
     return binary_meta, work_items
 
 
-def submit_batch_evaluation(entries, metric_module, metric, force):
+def submit_batch_evaluation(entries, metric_module, metric, force, aggregate_fn=None):
     """Submit a batch job for evaluation (fire-and-forget).
 
     Collects all work across binaries, calls submit_batch(), and saves
@@ -386,6 +414,9 @@ def submit_batch_evaluation(entries, metric_module, metric, force):
 
     if not all_work_items:
         print("All binaries cached or have no comparable functions.")
+        displayable = [r for r in cached_results if "functions" in r]
+        if displayable:
+            print_summary(displayable, aggregate_fn)
         return
 
     print(f"Found {len(binary_metas)} binaries with {len(all_work_items)} "
@@ -396,10 +427,12 @@ def submit_batch_evaluation(entries, metric_module, metric, force):
     if job_name is None:
         return
 
-    # 3. Build key→file_stem mapping for later reassembly
+    # 3. Build key→file_stem and key→source_len mappings for later reassembly
     key_stems = {}
+    key_source_lens = {}
     for item in all_work_items:
         key_stems[item["key"]] = item["file_stem"]
+        key_source_lens[item["key"]] = len(item["source"])
 
     # 4. Save tracking entry
     pending = _load_pending(metric)
@@ -411,6 +444,7 @@ def submit_batch_evaluation(entries, metric_module, metric, force):
         "binary_metas": binary_metas,
         "work_ranges": work_ranges,
         "key_stems": key_stems,
+        "key_source_lens": key_source_lens,
     })
     _save_pending(metric, pending)
 
@@ -418,6 +452,11 @@ def submit_batch_evaluation(entries, metric_module, metric, force):
     print(f"Tracking {len(all_work_items)} comparisons across "
           f"{len(binary_metas)} binaries.")
     print("Run with --retrieve to check results later.")
+
+    displayable = [r for r in cached_results if "functions" in r]
+    if displayable and aggregate_fn:
+        print(f"\nCached results for {len(displayable)} binary(ies):")
+        print_summary(displayable, aggregate_fn)
 
 
 def retrieve_batch_results(metric_module, metric, aggregate_fn):
@@ -455,15 +494,19 @@ def retrieve_batch_results(metric_module, metric, aggregate_fn):
         binary_metas = entry["binary_metas"]
         work_ranges = entry["work_ranges"]
         key_stems = entry["key_stems"]
+        key_source_lens = entry.get("key_source_lens", {})
 
         for bmeta, (start, count) in zip(binary_metas, work_ranges):
             function_results = {}
             for i in range(start, start + count):
                 key = f"k{i:06d}"
                 stem = key_stems[key]
-                function_results[stem] = scores_by_key.get(
+                result_entry = scores_by_key.get(
                     key, {"score": -1, "error": "missing_from_batch"},
                 )
+                if key in key_source_lens:
+                    result_entry["source_len"] = key_source_lens[key]
+                function_results[stem] = result_entry
 
             all_scores = list(function_results.values())
             agg = aggregate_fn(all_scores) if all_scores else aggregate_fn([])
@@ -505,18 +548,20 @@ def main():
     # Two-pass parse: first grab --metric so we can load metric-specific args,
     # then re-parse with the full set.
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--metric", required=True)
-    pre_args, _ = pre_parser.parse_known_args()
-
-    try:
-        metric_module = get_metric_module(pre_args.metric)
-    except ImportError as e:
-        print(f"Error loading metric '{pre_args.metric}': {e}")
-        sys.exit(1)
+    pre_parser.add_argument("--metric", default=None)
+    pre_args, remaining = pre_parser.parse_known_args()
 
     parser = argparse.ArgumentParser(
         description="Compare inference output against original source chunks.",
     )
+
+    metric_module = None
+    if pre_args.metric:
+        try:
+            metric_module = get_metric_module(pre_args.metric)
+        except ImportError as e:
+            print(f"Error loading metric '{pre_args.metric}': {e}")
+            sys.exit(1)
     parser.add_argument(
         "--metric", required=True,
         help="Name of comparison metric (maps to proj261.eval.comparisons.<metric>)",
@@ -547,10 +592,21 @@ def main():
     )
 
     # Let the metric add its own CLI flags
-    if hasattr(metric_module, "add_args"):
+    if metric_module and hasattr(metric_module, "add_args"):
         metric_module.add_args(parser)
 
     args = parser.parse_args()
+
+    if not args.metric:
+        parser.error("the following arguments are required: --metric")
+
+    # Load metric module if not already loaded (shouldn't happen, but just in case)
+    if metric_module is None:
+        try:
+            metric_module = get_metric_module(args.metric)
+        except ImportError as e:
+            print(f"Error loading metric '{args.metric}': {e}")
+            sys.exit(1)
 
     # Let the metric initialize (e.g. create API clients)
     if hasattr(metric_module, "configure"):
@@ -586,6 +642,7 @@ def main():
     if use_batch:
         submit_batch_evaluation(
             entries, metric_module, args.metric, args.force,
+            aggregate_fn=aggregate_fn,
         )
     else:
         results = []

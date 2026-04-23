@@ -542,8 +542,8 @@ def retrieve_batch_results(client, args):
             print(f"  {job_name}: SUCCEEDED — downloading results...")
 
             # Download results JSONL
-            output_file_name = job.output.file_name
-            content = client.files.download(name=output_file_name)
+            output_file_name = job.dest.file_name
+            content = client.files.download(file=output_file_name)
 
             key_map = tracker["key_map"]
             binary_results = tracker["binary_results"]

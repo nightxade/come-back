@@ -189,20 +189,31 @@ def compare_functions(
     if not isinstance(score, (int, float)) or score < 0 or score > 10:
         return {"score": -1, "error": "invalid_score", "raw": text}
 
-    result = {"score": score / 10.0}
+    result = {"score": score / 10.0, "source_len": len(source)}
     if _explain:
         result["explanation"] = parsed.get("explanation", "")
     return result
 
 
 def aggregate(results: list[dict]) -> dict:
-    """Compute mean score, excluding errors."""
+    """Compute mean and source-length-weighted mean score, excluding errors."""
     valid = [r for r in results if r.get("score", -1) >= 0]
     errors = len(results) - len(valid)
     if not valid:
-        return {"mean_score": 0.0, "num_scored": 0, "num_errors": errors}
+        return {"mean_score": 0.0, "weighted_score": 0.0, "num_scored": 0, "num_errors": errors}
     mean = sum(r["score"] for r in valid) / len(valid)
-    return {"mean_score": round(mean, 4), "num_scored": len(valid), "num_errors": errors}
+    with_len = [r for r in valid if "source_len" in r]
+    if with_len:
+        total_len = sum(r["source_len"] for r in with_len)
+        weighted = sum(r["score"] * r["source_len"] for r in with_len) / total_len
+    else:
+        weighted = mean
+    return {
+        "mean_score": round(mean, 4),
+        "weighted_score": round(weighted, 4),
+        "num_scored": len(valid),
+        "num_errors": errors,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -285,8 +296,8 @@ def retrieve_batch(job_name):
 
     if status == "JOB_STATE_SUCCEEDED":
         print(f"Batch job {job_name} succeeded, downloading results...")
-        output_file_name = job.output.file_name
-        content = _client.files.download(name=output_file_name)
+        output_file_name = job.dest.file_name
+        content = _client.files.download(file=output_file_name)
 
         scores_by_key: dict[str, dict] = {}
         for line in content.decode().strip().split("\n"):
