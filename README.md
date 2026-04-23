@@ -273,6 +273,14 @@ uv run compare --metric llm --model gemini-2.5-flash  # use a different judge mo
 | `--explain` | Ask the model for an explanation alongside the score |
 | `--model` | Gemini model to use as judge (default: `gemini-3.1-flash-lite-preview`) |
 
+**`syntax`** — Syntax validity check via tree-sitter. Parses each inferred Go function and scores 1.0 for a clean parse, 0.0 if any syntax errors are found. Runs locally, no API key needed.
+
+```bash
+uv run compare --metric syntax --repo ollama/ollama
+```
+
+Per-function results include `score`, `valid` (boolean), `error_count` (number of ERROR/MISSING AST nodes), `node_count` (total AST nodes in the inferred output), and `source_len`. Aggregates report `mean_score`, `weighted_score`, and `valid_count` / `invalid_count` / `total`.
+
 **`example`** — Placeholder that always returns 0. Useful for testing the framework end-to-end.
 
 #### AST-binned statistics
