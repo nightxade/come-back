@@ -428,7 +428,7 @@ def submit_batch_inference(client, entries, args):
             for bpath in needed_binaries:
                 ent = next(w["entry"] for w in all_work if w["entry"]["binary_path"] == bpath)
                 display_name = f"{safe_name(ent['repo'])}/{ent['variant']}/{ent['binary']}"
-                futures[pool.submit(client.files.upload, path=Path(bpath),
+                futures[pool.submit(client.files.upload, file=Path(bpath),
                                     config=types.UploadFileConfig(display_name=display_name))] = bpath
 
             for future in tqdm(as_completed(futures), total=len(futures), desc="Uploading binaries"):
@@ -475,7 +475,7 @@ def submit_batch_inference(client, entries, args):
             tmp_path = Path(tmp.name)
 
         print("Uploading batch requests file...")
-        jsonl_file = client.files.upload(path=tmp_path, config=types.UploadFileConfig(display_name="batch_requests.jsonl"))
+        jsonl_file = client.files.upload(file=tmp_path, config=types.UploadFileConfig(display_name="batch_requests.jsonl", mime_type="text/plain"))
 
         # 4. Start Batch
         print(f"Submitting batch job (model={args.model})...")

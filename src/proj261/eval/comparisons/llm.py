@@ -257,8 +257,8 @@ def submit_batch(work_items):
 
         print("Uploading batch requests file...")
         uploaded_file = _client.files.upload(
-            path=tmp_path,
-            config=types.UploadFileConfig(display_name="llm_judge_batch.jsonl"),
+            file=tmp_path,
+            config=types.UploadFileConfig(display_name="llm_judge_batch.jsonl", mime_type="text/plain"),
         )
 
         print(f"Submitting batch job (model={_model})...")
