@@ -275,6 +275,24 @@ uv run compare --metric llm --model gemini-2.5-flash  # use a different judge mo
 
 **`example`** — Placeholder that always returns 0. Useful for testing the framework end-to-end.
 
+#### AST-binned statistics
+
+Breaks down evaluation scores by Go source AST complexity (node count and tree depth) to show how the model performs on simple vs. complex functions. Reads existing result JSONs and parses source chunks with tree-sitter.
+
+```bash
+uv run eval-ast --metric llm
+uv run eval-ast --metric codebleu --repo ollama/ollama --variant default
+uv run eval-ast --metric llm --max-repos 5
+```
+
+| Flag | Description |
+|------|-------------|
+| `--metric` | **Required.** Name of comparison metric to analyze |
+| `--repo` | Filter to specific repo(s) |
+| `--variant` | Filter to a build variant |
+| `--max-repos` | Limit number of repos |
+| `--max-binaries` | Limit total number of binaries |
+
 ### Utilities
 
 **Count tokens** for a file using the Gemini API:

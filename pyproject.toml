@@ -25,6 +25,7 @@ map-sources = "proj261.data.map_sources:main"
 chunk-sources = "proj261.data.chunk_sources:main"
 scrape-repos = "proj261.data.scrape_go_repos:main"
 compare = "proj261.eval.compare:main"
+eval-ast = "proj261.eval.eval_ast:main"
 
 [tool.uv]
 package = true
