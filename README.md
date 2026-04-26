@@ -127,7 +127,7 @@ uv run filter-decomps --max-repos 10
 | `--max-repos` | Limit number of repos |
 | `--force` | Re-filter even if output exists |
 
-The inference step automatically prefers chunked decomps when available, then filtered, then raw.[^1]
+The inference step requires chunked decomps.[^1]
 
 ### 5. Chunk decomps into per-function files
 
@@ -146,7 +146,7 @@ uv run chunk-decomps --force
 | `--max-repos` | Limit number of repos |
 | `--force` | Re-chunk even if output exists |
 
-The inference step automatically prefers chunked decomps when available.
+The inference step requires chunked decomps.
 
 ### 6. Chunk source files for evaluation
 
@@ -188,35 +188,28 @@ False positives (filter includes a function not in `source_map.json`) are inform
 
 ### 8. LLM inference with Gemini
 
-Sends Ghidra decompilations and/or raw binaries to Gemini to recover Go source code. Uses the Batch API by default in a fire-and-forget pattern: `submit_batch_inference` uploads work and records the job in `pending_batches.json`, and `retrieve_batch_results` polls for completed jobs and downloads results. This allows submitting large batch jobs and retrieving results later.
+Sends Ghidra decompilations to Gemini to recover Go source code. Each function's decompiled C pseudocode is sent individually, and the LLM recovers the corresponding Go function. Uses the Batch API by default in a fire-and-forget pattern: `submit_batch_inference` uploads work and records the job in `pending_batches.json`, and `retrieve_batch_results` polls for completed jobs and downloads results. This allows submitting large batch jobs and retrieving results later.
 
 ```bash
-uv run infer --mode decomp --repo ollama/ollama
-uv run infer --mode decomp+binary --max-repos 5
-uv run infer --mode binary --variant default
-uv run infer --mode decomp --max-calls 100
-uv run infer --mode decomp --no-batch --threads 4   # synchronous mode
-uv run infer --retrieve                              # check pending jobs and download results
+uv run infer --repo ollama/ollama
+uv run infer --max-repos 5
+uv run infer --variant default --max-calls 100
+uv run infer --no-batch --threads 4   # synchronous mode
+uv run infer --retrieve               # check pending jobs and download results
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--mode` | **Required** (except with `--retrieve`). `decomp`, `binary`, or `decomp+binary` |
 | `--repo` | Filter to a specific repo |
 | `--variant` | Filter to a build variant |
 | `--max-repos` | Limit number of repos |
 | `--max-binaries` | Limit total number of binaries to process |
 | `--max-calls` | Limit total number of LLM inference calls |
-| `--threads` | Parallel threads for sync mode / binary uploads (default: 1) |
+| `--threads` | Parallel threads for sync mode (default: 1) |
 | `--force` | Re-run even if output exists |
 | `--model` | Gemini model (default: `gemini-3.1-flash-lite`) |
 | `--no-batch` | Use synchronous API instead of Batch API |
 | `--retrieve` | Check pending batch jobs and download completed results |
-
-Modes:
-- **decomp** — sends only the Ghidra `.c` decompilation
-- **binary** — sends only the raw compiled binary
-- **decomp+binary** — sends both together
 
 ### 9. Evaluate inference output
 

@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Send Ghidra decompilations and/or raw binaries to Gemini to recover Go source.
+"""Send Ghidra decompilations to Gemini to recover Go source.
 
 Reads data/metadata.json to discover binaries, then for each one:
-  - Optionally uploads the raw binary via the Gemini Files API
   - Loads chunked decomps from data/decomps_chunked/
-  - Sends each chunk to Gemini with a mode-appropriate prompt
+  - Sends each chunk to Gemini with the decompilation prompt
   - Writes recovered Go source to out/pred/<owner__repo>/<variant>/<binary>/
-
-Modes:
-  decomp        — send only the Ghidra decompilation
-  binary        — send only the raw binary
-  decomp+binary — send both
 """
 
 import argparse
@@ -24,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from proj261.util import METADATA_PATH, BINARIES_DIR, CHUNKED_DECOMPS_DIR, PRED_DIR, PROJECT_DIR, DEFAULT_MODEL, safe_name
+from proj261.util import METADATA_PATH, CHUNKED_DECOMPS_DIR, PRED_DIR, PROJECT_DIR, DEFAULT_MODEL, safe_name
 
 from dotenv import load_dotenv
 from google import genai
@@ -34,8 +28,6 @@ from tqdm import tqdm
 # --------------------------------------------------------------------------- #
 #  Configuration
 # --------------------------------------------------------------------------- #
-
-MODES = ("decomp", "binary", "decomp+binary")
 
 RETRY_BASE = 2       # seconds
 RETRY_MULT = 2
@@ -70,34 +62,13 @@ def _save_pending(entries: list[dict]):
 #  System prompts
 # --------------------------------------------------------------------------- #
 
-_DECOMP_SYSTEM = (
+SYSTEM_PROMPT = (
     "You are an expert Go reverse engineer. You will be given a single "
     "decompiled C pseudocode function produced by Ghidra from a compiled Go "
     "binary. Recover the original Go source code for this function as "
     "accurately as possible. Output ONLY valid Go code with no explanation. "
     "Exclude package declarations and imports."
 )
-
-_BINARY_SYSTEM = (
-    "You are an expert Go reverse engineer. You will be given a compiled Go "
-    "binary. Analyze it and recover the original Go source code for the "
-    "requested function as accurately as possible. Output ONLY valid Go code "
-    "with no explanation. Exclude package declarations and imports."
-)
-
-_DECOMP_BINARY_SYSTEM = (
-    "You are an expert Go reverse engineer. You will be given a compiled Go "
-    "binary AND the Ghidra decompiled C pseudocode for a single function. "
-    "Use both to recover the original Go source code for this function as "
-    "accurately as possible. Output ONLY valid Go code with no explanation. "
-    "Exclude package declarations and imports."
-)
-
-SYSTEM_PROMPTS = {
-    "decomp": _DECOMP_SYSTEM,
-    "binary": _BINARY_SYSTEM,
-    "decomp+binary": _DECOMP_BINARY_SYSTEM,
-}
 
 
 def load_metadata() -> dict:
@@ -111,17 +82,14 @@ def strip_code_fences(text: str) -> str:
     return text
 
 
-def get_chunks_for_binary_impl(entry, mode):
+def get_chunks_for_binary_impl(entry):
     """Load per-function chunked decomps for a binary.
 
     Returns list of (output_rel_path, source_text) tuples.  *output_rel_path*
     mirrors the package/function layout (e.g. ``main/main``,
     ``github.com__foo__bar/Func``) and is used to construct the output ``.go``
-    path.  For binary-only mode returns a single ("whole", None) entry.
+    path.
     """
-    if mode == "binary":
-        return [("whole", None)]
-
     chunked_dir = entry.get("chunked_dir")
     if not chunked_dir:
         return []
@@ -195,13 +163,12 @@ def call_gemini(
 def process_binary(
     client: genai.Client,
     entry: dict,
-    mode: str,
     model: str,
     force: bool,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     call_budget: list[int] | None = None,
 ) -> dict:
-    """Process a single binary: upload, infer chunks, write output.
+    """Process a single binary: infer chunks, write output.
 
     Args:
         max_output_tokens: Maximum tokens in each generated response.
@@ -213,7 +180,6 @@ def process_binary(
     repo = entry["repo"]
     variant = entry["variant"]
     binary = entry["binary"]
-    binary_path = Path(entry["binary_path"])
 
     sname = safe_name(repo)
     out_dir = PRED_DIR / sname / variant / binary
@@ -230,14 +196,10 @@ def process_binary(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    system_prompt = SYSTEM_PROMPTS[mode]
-    needs_binary = mode in ("binary", "decomp+binary")
-
     result = {
         "repo": repo,
         "variant": variant,
         "binary": binary,
-        "mode": mode,
         "model": model,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "functions": {},
@@ -246,81 +208,46 @@ def process_binary(
         "total_output_tokens": 0,
     }
 
-    # Upload binary if needed
-    uploaded_file = None
-    if needs_binary:
-        try:
-            uploaded_file = client.files.upload(
-                file=binary_path,
-                config=types.UploadFileConfig(
-                    display_name=f"{sname}/{variant}/{binary}",
-                    mime_type="text/plain",
-                ),
-            )
-        except Exception as e:
-            tqdm.write(f"    Failed to upload binary: {e}")
-            result["status"] = "error"
-            result["error"] = f"upload failed: {e}"
-            result["finished_at"] = datetime.now(timezone.utc).isoformat()
-            meta_path.write_text(json.dumps(result, indent=2))
-            return result
+    # Determine chunks to process
+    chunks = get_chunks_for_binary_impl(entry)
 
-    try:
-        # Determine chunks to process
-        chunks = get_chunks_for_binary_impl(entry, mode)
+    for rel_path, code_block in chunks:
+        out_file = out_dir / f"{rel_path}.go"
 
-        for rel_path, code_block in chunks:
-            out_file = out_dir / f"{rel_path}.go"
+        # Per-function resumability
+        if not force and out_file.exists() and out_file.stat().st_size > 0:
+            result["functions"][rel_path] = {"status": "skipped"}
+            continue
 
-            # Per-function resumability
-            if not force and out_file.exists() and out_file.stat().st_size > 0:
-                result["functions"][rel_path] = {"status": "skipped"}
-                continue
+        # Check call budget
+        if call_budget is not None and call_budget[0] <= 0:
+            break
 
-            # Check call budget
-            if call_budget is not None and call_budget[0] <= 0:
-                break
+        response = call_gemini(client, model, SYSTEM_PROMPT, [code_block], max_output_tokens)
+        if call_budget is not None:
+            call_budget[0] -= 1
 
-            # Build content parts
-            contents = []
-            if uploaded_file is not None:
-                contents.append(uploaded_file)
-            if code_block is not None:
-                contents.append(code_block)
+        if response is None:
+            result["functions"][rel_path] = {"status": "error"}
+            continue
 
-            response = call_gemini(client, model, system_prompt, contents, max_output_tokens)
-            if call_budget is not None:
-                call_budget[0] -= 1
+        # Extract text and token counts
+        text = response.text or ""
+        text = strip_code_fences(text)
 
-            if response is None:
-                result["functions"][rel_path] = {"status": "error"}
-                continue
+        usage = response.usage_metadata
+        in_tok = usage.prompt_token_count if usage else 0
+        out_tok = usage.candidates_token_count if usage else 0
+        result["total_input_tokens"] += in_tok
+        result["total_output_tokens"] += out_tok
 
-            # Extract text and token counts
-            text = response.text or ""
-            text = strip_code_fences(text)
-
-            usage = response.usage_metadata
-            in_tok = usage.prompt_token_count if usage else 0
-            out_tok = usage.candidates_token_count if usage else 0
-            result["total_input_tokens"] += in_tok
-            result["total_output_tokens"] += out_tok
-
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-            out_file.write_text(text)
-            result["functions"][rel_path] = {
-                "status": "ok",
-                "input_tokens": in_tok,
-                "output_tokens": out_tok,
-            }
-
-    finally:
-        # Clean up uploaded file
-        if uploaded_file is not None:
-            try:
-                client.files.delete(name=uploaded_file.name)
-            except Exception:
-                pass
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(text)
+        result["functions"][rel_path] = {
+            "status": "ok",
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+        }
 
     # Check if all functions succeeded
     statuses = {v["status"] for v in result["functions"].values()}
@@ -341,10 +268,9 @@ def submit_batch_inference(client, entries, args):
     and saves tracking info to pending_batches.json.  Does NOT poll or
     download results — use ``retrieve_batch_results`` for that.
     """
-    print(f"Collecting work for batch inference (model={args.model}, mode={args.mode})...")
+    print(f"Collecting work for batch inference (model={args.model})...")
 
     all_work = []
-    needed_binaries = set()
     binary_results = {}
 
     for entry in entries:
@@ -364,7 +290,7 @@ def submit_batch_inference(client, entries, args):
                 pass
 
         # Determine chunks
-        chunks = get_chunks_for_binary_impl(entry, args.mode)
+        chunks = get_chunks_for_binary_impl(entry)
 
         pending_chunks = []
         for rel_path, code_block in chunks:
@@ -380,14 +306,11 @@ def submit_batch_inference(client, entries, args):
                 "entry": entry,
                 "chunks": pending_chunks
             })
-            if args.mode in ("binary", "decomp+binary"):
-                needed_binaries.add(entry["binary_path"])
 
             binary_results[f"{entry['repo']}|{variant}|{binary}"] = {
                 "repo": entry["repo"],
                 "variant": variant,
                 "binary": binary,
-                "mode": args.mode,
                 "model": args.model,
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "functions": {},
@@ -419,25 +342,8 @@ def submit_batch_inference(client, entries, args):
     total_chunks = sum(len(w["chunks"]) for w in all_work)
     print(f"Found {len(all_work)} binaries with {total_chunks} functions/chunks to process.")
 
-    # 1. Upload binaries
-    uploaded_binaries = {}
-    if needed_binaries:
-        print(f"Uploading {len(needed_binaries)} binaries...")
-        with ThreadPoolExecutor(max_workers=min(len(needed_binaries), args.threads)) as pool:
-            futures = {}
-            for bpath in needed_binaries:
-                ent = next(w["entry"] for w in all_work if w["entry"]["binary_path"] == bpath)
-                display_name = f"{safe_name(ent['repo'])}/{ent['variant']}/{ent['binary']}"
-                futures[pool.submit(client.files.upload, file=Path(bpath),
-                                    config=types.UploadFileConfig(display_name=display_name))] = bpath
-
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Uploading binaries"):
-                bpath = futures[future]
-                uploaded_binaries[bpath] = future.result()
-
-    # 2. Prepare JSONL
+    # 1. Prepare JSONL
     print("Preparing batch request JSONL...")
-    system_prompt = SYSTEM_PROMPTS[args.mode]
     jsonl_lines = []
     key_map = {}
 
@@ -449,24 +355,16 @@ def submit_batch_inference(client, entries, args):
             key = f"k{len(jsonl_lines):06d}"
             key_map[key] = [binary_key, rel_path]
 
-            parts = []
-            if args.mode in ("binary", "decomp+binary"):
-                up_file = uploaded_binaries[entry["binary_path"]]
-                parts.append({"fileData": {"fileUri": up_file.uri, "mimeType": up_file.mime_type}})
-
-            if code_block:
-                parts.append({"text": code_block})
-
             request_obj = {
                 "key": key,
                 "request": {
-                    "contents": [{"role": "user", "parts": parts}],
-                    "systemInstruction": {"parts": [{"text": system_prompt}]}
+                    "contents": [{"role": "user", "parts": [{"text": code_block}]}],
+                    "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]}
                 }
             }
             jsonl_lines.append(json.dumps(request_obj))
 
-    # 3. Upload JSONL and create batch job
+    # 2. Upload JSONL and create batch job
     tmp_path = None
     jsonl_file = None
     try:
@@ -477,7 +375,7 @@ def submit_batch_inference(client, entries, args):
         print("Uploading batch requests file...")
         jsonl_file = client.files.upload(file=tmp_path, config=types.UploadFileConfig(display_name="batch_requests.jsonl", mime_type="text/plain"))
 
-        # 4. Start Batch
+        # 3. Start Batch
         print(f"Submitting batch job (model={args.model})...")
         batch_job = client.batches.create(
             model=args.model,
@@ -495,19 +393,15 @@ def submit_batch_inference(client, entries, args):
             except Exception:
                 pass
 
-    # 5. Save tracking entry
-    uploaded_binary_names = [uf.name for uf in uploaded_binaries.values()]
-
+    # 4. Save tracking entry
     pending = _load_pending()
     pending.append({
         "job_name": batch_job.name,
         "model": args.model,
-        "mode": args.mode,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
         "num_items": len(jsonl_lines),
         "key_map": key_map,
         "binary_results": binary_results,
-        "uploaded_binary_names": uploaded_binary_names,
     })
     _save_pending(pending)
 
@@ -608,24 +502,10 @@ def retrieve_batch_results(client, args):
                 meta_path.write_text(json.dumps(res_meta, indent=2))
                 all_results.append(res_meta)
 
-            # Clean up uploaded binaries
-            for up_name in tracker.get("uploaded_binary_names", []):
-                try:
-                    client.files.delete(name=up_name)
-                except Exception:
-                    pass
-
         elif status in ("JOB_STATE_FAILED", "JOB_STATE_CANCELLED"):
             print(f"  {job_name}: {status}")
             if hasattr(job, "error") and job.error:
                 print(f"    Error: {job.error}")
-
-            # Clean up uploaded binaries
-            for up_name in tracker.get("uploaded_binary_names", []):
-                try:
-                    client.files.delete(name=up_name)
-                except Exception:
-                    pass
 
         else:
             # Still running
@@ -645,11 +525,9 @@ def retrieve_batch_results(client, args):
 #  Entry collection
 # --------------------------------------------------------------------------- #
 
-def collect_entries(meta: dict, mode: str, args) -> list[dict]:
+def collect_entries(meta: dict, args) -> list[dict]:
     """Build a flat list of binaries to process, respecting filters."""
     entries = []
-    needs_decomp = mode in ("decomp", "decomp+binary")
-    needs_binary = mode in ("binary", "decomp+binary")
 
     for repo_name, info in meta["repos"].items():
         if args.repo and repo_name not in args.repo:
@@ -662,20 +540,15 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
             if args.variant and variant != args.variant:
                 continue
             for bin_name in bin_list:
-                binary_path = BINARIES_DIR / sname / variant / bin_name
                 chunked_dir = CHUNKED_DECOMPS_DIR / sname / variant / bin_name
 
-                # Check prerequisites
-                if needs_binary and not binary_path.exists():
-                    continue
-                if needs_decomp and not (chunked_dir / "manifest.json").exists():
+                if not (chunked_dir / "manifest.json").exists():
                     continue
 
                 entry = {
                     "repo": repo_name,
                     "variant": variant,
                     "binary": bin_name,
-                    "binary_path": str(binary_path),
                     "chunked_dir": str(chunked_dir),
                 }
 
@@ -706,10 +579,8 @@ def collect_entries(meta: dict, mode: str, args) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Send Ghidra decompilations / binaries to Gemini to recover Go source.",
+        description="Send Ghidra decompilations to Gemini to recover Go source.",
     )
-    parser.add_argument("--mode", required=True, choices=MODES,
-                        help="What to send: decomp, binary, or decomp+binary")
     parser.add_argument("--repo", type=str, nargs="*", default=None,
                         help="Filter to specific repo(s) (e.g. ollama/ollama)")
     parser.add_argument("--variant", type=str, default=None,
@@ -719,7 +590,7 @@ def main():
     parser.add_argument("--max-binaries", type=int, default=None,
                         help="Limit total number of binaries to process")
     parser.add_argument("--threads", type=int, default=1,
-                        help="Parallel threads for synchronous mode or binary uploads (default: 1)")
+                        help="Parallel threads for synchronous mode (default: 1)")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if output already exists")
     parser.add_argument("--max-calls", type=int, default=None,
@@ -750,7 +621,7 @@ def main():
 
     # Collect work
     meta = load_metadata()
-    entries = collect_entries(meta, args.mode, args)
+    entries = collect_entries(meta, args)
 
     if not args.no_batch:
         submit_batch_inference(client, entries, args)
@@ -780,12 +651,12 @@ def main():
     call_budget = [args.max_calls] if args.max_calls is not None else None
 
     print(f"Processing {len(entries)} binaries with model={args.model}, "
-          f"mode={args.mode}, threads={n_threads} (SYNC MODE)")
+          f"threads={n_threads} (SYNC MODE)")
 
     results = []
 
     def _do_one(entry):
-        return process_binary(client, entry, args.mode, args.model, args.force,
+        return process_binary(client, entry, args.model, args.force,
                               args.max_output_tokens, call_budget)
 
     if n_threads == 1:
