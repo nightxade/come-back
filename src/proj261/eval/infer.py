@@ -36,6 +36,24 @@ RETRY_MAX = 5
 
 DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
+# Input pricing per 1M tokens (USD) for Flash-Lite models.
+# Source: https://ai.google.dev/gemini-api/docs/pricing
+_INPUT_PRICING = {
+    # model substring -> (standard $/1M, batch $/1M)
+    "3.1-flash-lite": (0.25, 0.125),
+    "2.5-flash-lite": (0.10, 0.05),
+    "2.0-flash-lite": (0.075, 0.0375),
+}
+
+
+def _estimate_cost(model: str, total_tokens: int, batch: bool) -> float | None:
+    """Return estimated input cost in USD, or None if model is unrecognized."""
+    for key, (std_price, batch_price) in _INPUT_PRICING.items():
+        if key in model:
+            price = batch_price if batch else std_price
+            return total_tokens / 1_000_000 * price
+    return None
+
 
 # --------------------------------------------------------------------------- #
 #  Pending-batch tracker
@@ -69,6 +87,32 @@ SYSTEM_PROMPT = (
     "accurately as possible. Output ONLY valid Go code with no explanation. "
     "Exclude package declarations and imports."
 )
+
+
+def _print_cost_estimate(client, model: str, num_chunks: int,
+                         all_text: str, batch: bool) -> None:
+    """Count tokens via the API and print an estimated input cost."""
+    try:
+        # Count the system prompt tokens (sent with every request)
+        sys_resp = client.models.count_tokens(model=model, contents=SYSTEM_PROMPT)
+        sys_tokens = sys_resp.total_tokens
+
+        # Count all chunk text tokens in one call
+        chunk_resp = client.models.count_tokens(model=model, contents=all_text)
+        chunk_tokens = chunk_resp.total_tokens
+
+        total = chunk_tokens + sys_tokens * num_chunks
+        cost = _estimate_cost(model, total, batch)
+        mode_label = "batch" if batch else "standard"
+
+        print(f"  Estimated input tokens: {total:,} "
+              f"({chunk_tokens:,} content + {sys_tokens:,} system x {num_chunks:,} requests)")
+        if cost is not None:
+            print(f"  Estimated input cost ({mode_label}): ${cost:.4f}")
+        else:
+            print(f"  (pricing unavailable for model '{model}')")
+    except Exception as e:
+        print(f"  Could not estimate cost: {e}")
 
 
 def load_metadata() -> dict:
@@ -342,6 +386,15 @@ def submit_batch_inference(client, entries, args):
     total_chunks = sum(len(w["chunks"]) for w in all_work)
     print(f"Found {len(all_work)} binaries with {total_chunks} functions/chunks to process.")
 
+    # Cost estimate
+    all_text = "\n".join(
+        code_block for w in all_work for _, code_block in w["chunks"]
+    )
+    _print_cost_estimate(client, args.model, total_chunks, all_text, batch=True)
+
+    if args.dry_run:
+        return
+
     # 1. Prepare JSONL
     print("Preparing batch request JSONL...")
     jsonl_lines = []
@@ -517,8 +570,14 @@ def retrieve_batch_results(client, args):
     if still_pending:
         print(f"\n{len(still_pending)} job(s) still running.")
     if all_results:
+        # Infer model from first result that has one
+        result_model = ""
+        for r in all_results:
+            if r.get("model"):
+                result_model = r["model"]
+                break
         print(f"{len(all_results)} binary result(s) written.")
-        print_summary(all_results)
+        print_summary(all_results, model=result_model, batch=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -603,6 +662,8 @@ def main():
                         help="Use synchronous API instead of Batch API")
     parser.add_argument("--retrieve", action="store_true",
                         help="Check pending batch jobs and download completed results")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Only estimate cost without running inference")
     args = parser.parse_args()
 
     # Load API key
@@ -653,6 +714,21 @@ def main():
     print(f"Processing {len(entries)} binaries with model={args.model}, "
           f"threads={n_threads} (SYNC MODE)")
 
+    # Cost estimate
+    all_chunks_text = []
+    total_chunk_count = 0
+    for entry in entries:
+        for _, code_block in get_chunks_for_binary_impl(entry):
+            all_chunks_text.append(code_block)
+            total_chunk_count += 1
+    if all_chunks_text:
+        _print_cost_estimate(client, args.model, total_chunk_count,
+                             "\n".join(all_chunks_text), batch=False)
+    del all_chunks_text
+
+    if args.dry_run:
+        return
+
     results = []
 
     def _do_one(entry):
@@ -679,10 +755,10 @@ def main():
                     results.append({"binary": entry["binary"], "status": "error"})
 
     # Summary
-    print_summary(results)
+    print_summary(results, model=args.model, batch=False)
 
 
-def print_summary(results):
+def print_summary(results, model: str = "", batch: bool = False):
     completed = sum(1 for r in results if r.get("status") == "completed")
     partial = sum(1 for r in results if r.get("status") == "partial")
     skipped = sum(1 for r in results if r.get("status") == "skipped")
@@ -697,6 +773,11 @@ def print_summary(results):
     print(f"  Errors:     {errored}")
     print(f"  Tokens in:  {total_in:,}")
     print(f"  Tokens out: {total_out:,}")
+    if model and total_in > 0:
+        cost = _estimate_cost(model, total_in, batch)
+        if cost is not None:
+            mode_label = "batch" if batch else "standard"
+            print(f"  Input cost ({mode_label}): ${cost:.4f}")
     print(f"  Output dir: {PRED_DIR}")
     print(f"{'='*60}")
 
