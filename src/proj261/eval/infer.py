@@ -89,23 +89,45 @@ SYSTEM_PROMPT = (
 )
 
 
+_SAMPLE_SIZE = 1000  # chunks to sample for tokens-per-char calibration
+
+
 def _print_cost_estimate(client, model: str, num_chunks: int,
-                         all_text: str, batch: bool) -> None:
-    """Count tokens via the API and print an estimated input cost."""
+                         chunk_texts: list[str], batch: bool) -> None:
+    """Estimate input tokens by sampling and print cost."""
+    import random
+
     try:
         # Count the system prompt tokens (sent with every request)
         sys_resp = client.models.count_tokens(model=model, contents=SYSTEM_PROMPT)
         sys_tokens = sys_resp.total_tokens
 
-        # Count all chunk text tokens in one call
-        chunk_resp = client.models.count_tokens(model=model, contents=all_text)
-        chunk_tokens = chunk_resp.total_tokens
+        total_chars = sum(len(t) for t in chunk_texts)
+
+        # Sample chunks to calibrate tokens-per-char ratio
+        if len(chunk_texts) <= _SAMPLE_SIZE:
+            sample = chunk_texts
+        else:
+            sample = random.sample(chunk_texts, _SAMPLE_SIZE)
+
+        sample_text = "\n".join(sample)
+        sample_chars = sum(len(t) for t in sample)
+        sample_resp = client.models.count_tokens(model=model, contents=sample_text)
+        sample_tokens = sample_resp.total_tokens
+
+        # Extrapolate
+        if sample_chars > 0:
+            ratio = sample_tokens / sample_chars
+            chunk_tokens = int(total_chars * ratio)
+        else:
+            chunk_tokens = 0
 
         total = chunk_tokens + sys_tokens * num_chunks
         cost = _estimate_cost(model, total, batch)
         mode_label = "batch" if batch else "standard"
 
-        print(f"  Estimated input tokens: {total:,} "
+        sampled_note = "" if len(chunk_texts) <= _SAMPLE_SIZE else " (sampled)"
+        print(f"  Estimated input tokens{sampled_note}: {total:,} "
               f"({chunk_tokens:,} content + {sys_tokens:,} system x {num_chunks:,} requests)")
         if cost is not None:
             print(f"  Estimated input cost ({mode_label}): ${cost:.4f}")
@@ -387,10 +409,9 @@ def submit_batch_inference(client, entries, args):
     print(f"Found {len(all_work)} binaries with {total_chunks} functions/chunks to process.")
 
     # Cost estimate
-    all_text = "\n".join(
-        code_block for w in all_work for _, code_block in w["chunks"]
-    )
-    _print_cost_estimate(client, args.model, total_chunks, all_text, batch=True)
+    all_chunk_texts = [code_block for w in all_work for _, code_block in w["chunks"]]
+    _print_cost_estimate(client, args.model, total_chunks, all_chunk_texts, batch=True)
+    del all_chunk_texts
 
     if args.dry_run:
         return
@@ -715,16 +736,14 @@ def main():
           f"threads={n_threads} (SYNC MODE)")
 
     # Cost estimate
-    all_chunks_text = []
-    total_chunk_count = 0
+    all_chunk_texts = []
     for entry in entries:
         for _, code_block in get_chunks_for_binary_impl(entry):
-            all_chunks_text.append(code_block)
-            total_chunk_count += 1
-    if all_chunks_text:
-        _print_cost_estimate(client, args.model, total_chunk_count,
-                             "\n".join(all_chunks_text), batch=False)
-    del all_chunks_text
+            all_chunk_texts.append(code_block)
+    if all_chunk_texts:
+        _print_cost_estimate(client, args.model, len(all_chunk_texts),
+                             all_chunk_texts, batch=False)
+    del all_chunk_texts
 
     if args.dry_run:
         return
