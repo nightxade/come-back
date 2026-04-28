@@ -8,8 +8,12 @@ dependencies = [
     "codebleu>=0.7.0",
     "dotenv>=0.9.9",
     "google-genai>=1.70.0",
+    "matplotlib>=3.9",
     "normalizer>=0.2.1",
+    "numpy>=1.26",
+    "pandas>=2.2",
     "pyghidra>=3.0.2",
+    "scipy>=1.14",
     "tqdm>=4.67.3",
     "tree-sitter-go==0.21.2",
 ]
@@ -26,6 +30,7 @@ chunk-sources = "proj261.data.chunk_sources:main"
 scrape-repos = "proj261.data.scrape_go_repos:main"
 compare = "proj261.eval.compare:main"
 eval-ast = "proj261.eval.eval_ast:main"
+statistics = "proj261.eval.statistics:main"
 
 [tool.uv]
 package = true

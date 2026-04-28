@@ -1,0 +1,165 @@
+========================================================================
+  Statistical Summary
+========================================================================
+
+A. Dataset Overview
+----------------------------------------
+  Total unique repos:      8
+  Total unique binaries:   43
+  Functions ( default):   39092
+  Functions (   debug):   39902
+  Functions (stripped):   38740
+
+  Functions with valid llm score: 108747
+  Functions with valid codebleu score: 117734
+  Functions with valid syntax score: 117734
+
+B. Per-Variant Aggregate Scores
+----------------------------------------
+
+  Metric: llm
+  Variant        Mean   WtMean      Std   Median       Q1       Q3      N
+  ---------- -------- -------- -------- -------- -------- -------- ------
+  default      0.6475   0.4654   0.3272   0.7000   0.3000   1.0000  34546
+  debug        0.6464   0.4662   0.3264   0.7000   0.3000   1.0000  35461
+  stripped     0.6265   0.4958   0.3243   0.6000   0.3000   1.0000  38740
+
+  Metric: codebleu
+  Variant        Mean   WtMean      Std   Median       Q1       Q3      N
+  ---------- -------- -------- -------- -------- -------- -------- ------
+  default      0.6700   0.5969   0.2513   0.6855   0.4645   0.8954  39092
+  debug        0.6698   0.5984   0.2514   0.6848   0.4624   0.8938  39902
+  stripped     0.6411   0.5713   0.2528   0.6627   0.4201   0.8347  38740
+
+  Metric: syntax
+  Variant        Mean   WtMean      Std   Median       Q1       Q3      N
+  ---------- -------- -------- -------- -------- -------- -------- ------
+  default      0.9988   0.9942   0.0350   1.0000   1.0000   1.0000  39092
+  debug        0.9984   0.9938   0.0397   1.0000   1.0000   1.0000  39902
+  stripped     0.9990   0.9962   0.0309   1.0000   1.0000   1.0000  38740
+
+C. Variant Comparison (Wilcoxon Signed-Rank Test)
+----------------------------------------
+
+  Metric: llm
+    default vs debug: W=24204527.5, p=1.0652e-01, n=34545, higher=debug, mean_diff=-0.0008
+    default vs stripped: W=44246337.5, p=1.2117e-06, n=33035, higher=stripped, mean_diff=-0.0053
+    debug vs stripped: W=46597544.5, p=1.2296e-04, n=33884, higher=stripped, mean_diff=-0.0043
+
+  Metric: codebleu
+    default vs debug: W=114715397.5, p=4.2623e-01, n=38953, higher=debug, mean_diff=-0.0003
+    default vs stripped: W=134961762.5, p=5.9778e-247, n=37324, higher=default, mean_diff=+0.0283
+    debug vs stripped: W=140473452.5, p=2.2013e-250, n=38171, higher=debug, mean_diff=+0.0281
+
+  Metric: syntax
+    default vs debug: W=768.0, p=5.8782e-02, n=38953, higher=default, mean_diff=+0.0004
+    default vs stripped: W=1254.0, p=2.9870e-01, n=37324, higher=stripped, mean_diff=-0.0002
+    debug vs stripped: W=1408.0, p=1.3669e-02, n=38171, higher=stripped, mean_diff=-0.0006
+
+D. AST-Complexity Binned Scores (all variants)
+----------------------------------------
+
+  Metric: llm
+
+  AST Node Count Bins:
+    Bin                 Count     Mean   WtMean
+    ------------------ ------ -------- --------
+    [1, 25)               931   0.8273   0.8222
+    [25, 50)            31383   0.8412   0.8246
+    [50, 100)           22581   0.6884   0.6537
+    [100, 200)          26729   0.5675   0.5233
+    [200, 500)          15567   0.3911   0.3733
+    [500, inf)          11556   0.4836   0.4573
+
+  AST Depth Bins:
+    Bin                 Count     Mean   WtMean
+    ------------------ ------ -------- --------
+    [1, 5)                  1   1.0000   1.0000
+    [5, 10)             55648   0.8240   0.7905
+    [10, 15)            29201   0.4593   0.3938
+    [15, 20)            19433   0.4599   0.4947
+    [20, 25)             3871   0.3122   0.3706
+    [25, inf)             593   0.2494   0.2194
+
+  Metric: codebleu
+
+  AST Node Count Bins:
+    Bin                 Count     Mean   WtMean
+    ------------------ ------ -------- --------
+    [1, 25)              1022   0.5257   0.5255
+    [25, 50)            32338   0.8340   0.8240
+    [50, 100)           24989   0.6774   0.6515
+    [100, 200)          29428   0.5687   0.5407
+    [200, 500)          17665   0.5056   0.4788
+    [500, inf)          12292   0.6228   0.6132
+
+  AST Depth Bins:
+    Bin                 Count     Mean   WtMean
+    ------------------ ------ -------- --------
+    [1, 5)                  3   1.0000   1.0000
+    [5, 10)             58034   0.7911   0.7539
+    [10, 15)            33959   0.5371   0.4983
+    [15, 20)            20974   0.5658   0.6643
+    [20, 25)             4126   0.3777   0.4506
+    [25, inf)             638   0.2816   0.2401
+
+  Metric: syntax
+
+  AST Node Count Bins:
+    Bin                 Count     Mean   WtMean
+    ------------------ ------ -------- --------
+    [1, 25)              1022   1.0000   1.0000
+    [25, 50)            32338   0.9998   0.9998
+    [50, 100)           24989   0.9996   0.9996
+    [100, 200)          29428   0.9994   0.9991
+    [200, 500)          17665   0.9976   0.9969
+    [500, inf)          12292   0.9942   0.9923
+
+  AST Depth Bins:
+    Bin                 Count     Mean   WtMean
+    ------------------ ------ -------- --------
+    [1, 5)                  3   1.0000   1.0000
+    [5, 10)             58034   0.9998   0.9982
+    [10, 15)            33959   0.9991   0.9986
+    [15, 20)            20974   0.9967   0.9934
+    [20, 25)             4126   0.9944   0.9931
+    [25, inf)             638   0.9828   0.9857
+
+E. Metric Correlations
+----------------------------------------
+  llm_score vs codebleu_score (n=108747):
+    Pearson  r=0.7533, p=0.0000e+00
+    Spearman r=0.7576, p=0.0000e+00
+
+  source_len vs llm_score (n=108747):
+    Pearson  r=-0.2005, p=0.0000e+00
+    Spearman r=-0.5461, p=0.0000e+00
+
+  source_len vs codebleu_score (n=117734):
+    Pearson  r=-0.1166, p=0.0000e+00
+    Spearman r=-0.4595, p=0.0000e+00
+
+  source_len vs syntax_score (n=117734):
+    Pearson  r=-0.0466, p=1.4670e-57
+    Spearman r=-0.0397, p=2.8062e-42
+
+  ast_node_count vs llm_score (n=108747):
+    Pearson  r=-0.2137, p=0.0000e+00
+    Spearman r=-0.5198, p=0.0000e+00
+
+  ast_node_count vs codebleu_score (n=117734):
+    Pearson  r=-0.1090, p=8.8107e-308
+    Spearman r=-0.4366, p=0.0000e+00
+
+  ast_node_count vs syntax_score (n=117734):
+    Pearson  r=-0.0445, p=1.3407e-52
+    Spearman r=-0.0381, p=4.2282e-39
+
+F. Syntax Validity
+----------------------------------------
+  default   : 39044 / 39092 valid (99.9%)
+  debug     : 39839 / 39902 valid (99.8%)
+  stripped  : 38703 / 38740 valid (99.9%)
+  overall   : 117586 / 117734 valid (99.9%)
+
+========================================================================

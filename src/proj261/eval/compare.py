@@ -72,11 +72,14 @@ def collect_entries(meta: dict, args) -> list[dict]:
             for bin_name in bin_list:
                 source_dir = CHUNKED_SOURCES_DIR / sname / variant / bin_name
                 decomp_dir = CHUNKED_DECOMPS_DIR / sname / variant / bin_name
+                inference_dir = PRED_DIR / sname / variant / bin_name
 
-                # Both source chunks and decomp chunks must exist
+                # Source chunks, decomp chunks, and predictions must exist
                 if not (source_dir / "manifest.json").exists():
                     continue
                 if not (decomp_dir / "manifest.json").exists():
+                    continue
+                if not inference_dir.exists():
                     continue
 
                 entries.append({
