@@ -44,6 +44,18 @@ out/
 │       ├── metadata.json       # Inference metadata (mode, model, tokens, per-function status)
 │       └── {package}/{function}.go  # Per-function recovered Go source
 └── results/{metric}/{owner__repo}/{variant}/{binary}.json  # Evaluation results
+
+statistics/
+├── summary.txt              # Full text summary (sections A–F)
+├── variant_scores.png       # Mean scores by variant (llm, codebleu)
+├── score_distributions.png  # Box plots per metric and variant
+├── ast_size_vs_score.png    # Score vs AST node count bins
+├── ast_depth_vs_score.png   # Score vs AST depth bins
+├── metric_correlation.png   # LLM vs CodeBLEU hex-bin scatter
+├── source_len_vs_score.png  # Source length vs score per metric
+├── score_cdfs.png           # CDF of scores per variant and metric
+├── codebleu_submetrics.png  # CodeBLEU sub-component breakdown by variant
+└── paired_diffs.png         # Paired score difference histograms (default vs stripped)
 ```
 
 Build variants: `default`, `debug` (`-gcflags=-N -l`), `stripped` (`-ldflags=-s -w`).
@@ -293,6 +305,43 @@ uv run eval-ast --metric llm --max-repos 5
 | `--variant` | Filter to a build variant |
 | `--max-repos` | Limit number of repos |
 | `--max-binaries` | Limit total number of binaries |
+
+#### Comprehensive statistical analysis
+
+Aggregates all evaluation results across all three metrics (llm, codebleu, syntax) and all three build variants (default, debug, stripped) into a unified dataset, produces a text summary with statistical tests, and generates plots. Output goes to the `statistics/` directory.
+
+```bash
+uv run statistics
+uv run statistics --repo ollama/ollama
+uv run statistics --variant default --max-repos 5
+```
+
+| Flag | Description |
+|------|-------------|
+| `--repo` | Filter to specific repo(s) |
+| `--variant` | Filter to a build variant |
+| `--max-repos` | Limit number of repos |
+| `--max-binaries` | Limit total number of binaries |
+
+The text summary (`statistics/summary.txt`) contains six sections:
+
+- **A. Dataset overview** — Total functions per variant, unique repos/binaries, valid result counts per metric.
+- **B. Per-variant aggregate scores** — Mean, weighted mean, std, median, Q1, Q3 for each metric × variant combination.
+- **C. Variant comparison** — Wilcoxon signed-rank tests between all variant pairs for each metric, reporting test statistic, p-value, paired sample count, and which variant scores higher.
+- **D. AST-complexity binned scores** — Per-bin mean scores broken down by AST node count and depth bins (same bins as `eval-ast`), collapsed across all variants.
+- **E. Metric correlations** — Pearson and Spearman correlations between llm and codebleu scores, and between source length / AST node count and each metric score.
+- **F. Syntax validity** — Valid/invalid counts and rates per variant and overall.
+
+Plots (all saved as PNG):
+
+- `variant_scores.png` — Grouped bar chart of mean scores by variant with ±1 std error bars (llm, codebleu).
+- `score_distributions.png` — Box plots per metric, with variants as x-axis categories.
+- `ast_size_vs_score.png` / `ast_depth_vs_score.png` — Line plots showing how scores degrade with AST complexity.
+- `metric_correlation.png` — Hex-bin scatter of llm vs codebleu scores with Pearson r annotation.
+- `source_len_vs_score.png` — Hex-bin scatter of source length vs score per metric (log-scale x-axis).
+- `score_cdfs.png` — Cumulative distribution of scores per variant for each metric.
+- `codebleu_submetrics.png` — Grouped bar chart of CodeBLEU's four sub-components (ngram, weighted ngram, syntax match, dataflow) per variant.
+- `paired_diffs.png` — Histograms of paired score differences (default − stripped) for each metric, with mean and zero reference lines.
 
 ### Utilities
 
