@@ -25,6 +25,11 @@ from tqdm import tqdm
 
 RESULTS_DIR = OUT_DIR / "results"
 
+# Gemini batch API accepts JSONL files up to 2 GB.  We estimate per-item
+# sizes conservatively and split into multiple batch jobs at binary
+# boundaries when the total would exceed this.
+_MAX_BATCH_FILE_BYTES = 2_000_000_000
+
 
 # --------------------------------------------------------------------------- #
 #  Pending-batch tracker
@@ -425,36 +430,82 @@ def submit_batch_evaluation(entries, metric_module, metric, force, aggregate_fn=
     print(f"Found {len(binary_metas)} binaries with {len(all_work_items)} "
           f"functions to evaluate ({len(cached_results)} cached).")
 
-    # 2. Submit batch
-    job_name, uploaded_file = submit_fn(all_work_items)
-    if job_name is None:
-        return
-
-    # 3. Build key→file_stem and key→source_len mappings for later reassembly
+    # 2. Build key→file_stem and key→source_len mappings
     key_stems = {}
     key_source_lens = {}
     for item in all_work_items:
         key_stems[item["key"]] = item["file_stem"]
         key_source_lens[item["key"]] = len(item["source"])
 
-    # 4. Save tracking entry
+    # 3. Estimate JSONL size per binary and group into batches
+    #    (conservative: source + inferred text + 2 KB overhead per item)
+    binary_sizes = []
+    for _bmeta, (start, count) in zip(binary_metas, work_ranges):
+        size = 0
+        for i in range(start, start + count):
+            item = all_work_items[i]
+            size += len(item["source"].encode("utf-8"))
+            size += len(item.get("inferred", "").encode("utf-8"))
+            size += 2000  # JSON structure, system prompt, etc.
+        binary_sizes.append(size)
+
+    batch_ranges = []  # (start_binary_idx, end_binary_idx)
+    cur_start = 0
+    cur_size = 0
+    for i, bsize in enumerate(binary_sizes):
+        if cur_size > 0 and cur_size + bsize > _MAX_BATCH_FILE_BYTES:
+            batch_ranges.append((cur_start, i))
+            cur_start = i
+            cur_size = 0
+        cur_size += bsize
+    if cur_start < len(binary_metas):
+        batch_ranges.append((cur_start, len(binary_metas)))
+
+    if len(batch_ranges) > 1:
+        print(f"Splitting into {len(batch_ranges)} batches "
+              f"(API file size limit: 2 GB).")
+
+    # 4. Submit each batch and save tracking entries
     pending = _load_pending(metric)
-    pending.append({
-        "job_name": job_name,
-        "model": getattr(metric_module, "_model", "unknown"),
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-        "num_items": len(all_work_items),
-        "binary_metas": binary_metas,
-        "work_ranges": work_ranges,
-        "key_stems": key_stems,
-        "key_source_lens": key_source_lens,
-    })
+    submitted_jobs = 0
+
+    for batch_idx, (bstart, bend) in enumerate(batch_ranges):
+        batch_metas = binary_metas[bstart:bend]
+        batch_work_ranges = work_ranges[bstart:bend]
+
+        first_item_idx = batch_work_ranges[0][0]
+        last_range = batch_work_ranges[-1]
+        last_item_idx = last_range[0] + last_range[1]
+        batch_items = all_work_items[first_item_idx:last_item_idx]
+
+        job_name, uploaded_file = submit_fn(batch_items)
+        if job_name is None:
+            continue
+
+        batch_key_stems = {item["key"]: key_stems[item["key"]]
+                           for item in batch_items}
+        batch_key_source_lens = {item["key"]: key_source_lens[item["key"]]
+                                  for item in batch_items}
+
+        pending.append({
+            "job_name": job_name,
+            "model": getattr(metric_module, "_model", "unknown"),
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "num_items": len(batch_items),
+            "binary_metas": batch_metas,
+            "work_ranges": list(batch_work_ranges),
+            "key_stems": batch_key_stems,
+            "key_source_lens": batch_key_source_lens,
+        })
+        submitted_jobs += 1
+
     _save_pending(metric, pending)
 
-    print(f"\nBatch job submitted: {job_name}")
-    print(f"Tracking {len(all_work_items)} comparisons across "
-          f"{len(binary_metas)} binaries.")
-    print("Run with --retrieve to check results later.")
+    if submitted_jobs > 0:
+        print(f"\nSubmitted {len(all_work_items)} comparisons in "
+              f"{submitted_jobs} batch job(s) across "
+              f"{len(binary_metas)} binaries.")
+        print("Run with --retrieve to check results later.")
 
     displayable = [r for r in cached_results if "functions" in r]
     if displayable and aggregate_fn:

@@ -261,6 +261,7 @@ def submit_batch(work_items):
 
     # 2. Upload JSONL and submit batch job
     tmp_path = None
+    uploaded_file = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
             tmp.write("\n".join(jsonl_lines) + "\n")
@@ -281,6 +282,12 @@ def submit_batch(work_items):
     finally:
         if tmp_path and Path(tmp_path).exists():
             Path(tmp_path).unlink()
+        # Delete uploaded input file to free project storage (20 GB limit)
+        if uploaded_file:
+            try:
+                _client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
 
 
 def retrieve_batch(job_name):
@@ -298,6 +305,12 @@ def retrieve_batch(job_name):
         print(f"Batch job {job_name} succeeded, downloading results...")
         output_file_name = job.dest.file_name
         content = _client.files.download(file=output_file_name)
+
+        # Delete output file to free project storage (20 GB limit)
+        try:
+            _client.files.delete(name=output_file_name)
+        except Exception:
+            pass
 
         scores_by_key: dict[str, dict] = {}
         for line in content.decode().strip().split("\n"):

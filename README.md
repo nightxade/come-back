@@ -202,6 +202,8 @@ False positives (filter includes a function not in `source_map.json`) are inform
 
 Sends Ghidra decompilations to Gemini to recover Go source code. Each function's decompiled C pseudocode is sent individually, and the LLM recovers the corresponding Go function. Uses the Batch API by default in a fire-and-forget pattern: `submit_batch_inference` uploads work and records the job in `pending_batches.json`, and `retrieve_batch_results` polls for completed jobs and downloads results. This allows submitting large batch jobs and retrieving results later.
 
+When the total JSONL request file would exceed the Gemini API's 2 GB upload limit, the batch is automatically split into multiple jobs at binary boundaries. Each job gets its own tracking entry in `pending_batches.json` and is retrieved independently. The same splitting applies to batch-mode evaluation (`compare --metric llm`).
+
 ```bash
 uv run infer --repo ollama/ollama
 uv run infer --max-repos 5

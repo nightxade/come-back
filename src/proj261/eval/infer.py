@@ -36,6 +36,9 @@ RETRY_MAX = 5
 
 DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
+# Gemini batch API accepts JSONL files up to 2 GB.
+_MAX_BATCH_FILE_BYTES = 2_000_000_000
+
 # Input pricing per 1M tokens (USD) for Flash-Lite models.
 # Source: https://ai.google.dev/gemini-api/docs/pricing
 _INPUT_PRICING = {
@@ -416,18 +419,22 @@ def submit_batch_inference(client, entries, args):
     if args.dry_run:
         return
 
-    # 1. Prepare JSONL
+    # 1. Prepare JSONL lines per binary, tracking byte sizes
     print("Preparing batch request JSONL...")
-    jsonl_lines = []
-    key_map = {}
+    per_binary_data = []  # (lines, key_map_subset, binary_key, byte_size)
+    global_idx = 0
 
     for work in all_work:
         entry = work["entry"]
         binary_key = f"{entry['repo']}|{entry['variant']}|{entry['binary']}"
+        lines = []
+        km = {}
+        byte_size = 0
 
         for rel_path, code_block in work["chunks"]:
-            key = f"k{len(jsonl_lines):06d}"
-            key_map[key] = [binary_key, rel_path]
+            key = f"k{global_idx:06d}"
+            global_idx += 1
+            km[key] = [binary_key, rel_path]
 
             request_obj = {
                 "key": key,
@@ -436,51 +443,87 @@ def submit_batch_inference(client, entries, args):
                     "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]}
                 }
             }
-            jsonl_lines.append(json.dumps(request_obj))
+            line = json.dumps(request_obj)
+            lines.append(line)
+            byte_size += len(line.encode("utf-8")) + 1  # +1 for newline
 
-    # 2. Upload JSONL and create batch job
-    tmp_path = None
-    jsonl_file = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
-            tmp.write("\n".join(jsonl_lines) + "\n")
-            tmp_path = Path(tmp.name)
+        per_binary_data.append((lines, km, binary_key, byte_size))
 
-        print("Uploading batch requests file...")
-        jsonl_file = client.files.upload(file=tmp_path, config=types.UploadFileConfig(display_name="batch_requests.jsonl", mime_type="text/plain"))
+    # 2. Group binaries into size-limited batches (split at binary boundaries)
+    batch_groups = []  # list of (all_lines, merged_key_map, binary_keys)
+    cur_lines: list[str] = []
+    cur_km: dict = {}
+    cur_bkeys: list[str] = []
+    cur_size = 0
 
-        # 3. Start Batch
-        print(f"Submitting batch job (model={args.model})...")
-        batch_job = client.batches.create(
-            model=args.model,
-            src=jsonl_file.name
-        )
-        print(f"Batch job created: {batch_job.name}")
+    for lines, km, bkey, bsize in per_binary_data:
+        if cur_lines and cur_size + bsize > _MAX_BATCH_FILE_BYTES:
+            batch_groups.append((cur_lines, cur_km, cur_bkeys))
+            cur_lines, cur_km, cur_bkeys, cur_size = [], {}, [], 0
 
-    finally:
-        # Clean up temp JSONL (local file + uploaded copy)
-        if tmp_path and tmp_path.exists():
-            tmp_path.unlink()
-        if jsonl_file:
-            try:
-                client.files.delete(name=jsonl_file.name)
-            except Exception:
-                pass
+        cur_lines.extend(lines)
+        cur_km.update(km)
+        cur_bkeys.append(bkey)
+        cur_size += bsize
 
-    # 4. Save tracking entry
+    if cur_lines:
+        batch_groups.append((cur_lines, cur_km, cur_bkeys))
+
+    if len(batch_groups) > 1:
+        sizes = [sum(len(l.encode("utf-8")) + 1 for l in lines)
+                 for lines, _, _ in batch_groups]
+        print(f"Splitting into {len(batch_groups)} batches "
+              f"(API file size limit: 2 GB). "
+              f"Sizes: {', '.join(f'{s / 1e9:.2f} GB' for s in sizes)}")
+
+    # 3. Upload and submit each batch
     pending = _load_pending()
-    pending.append({
-        "job_name": batch_job.name,
-        "model": args.model,
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-        "num_items": len(jsonl_lines),
-        "key_map": key_map,
-        "binary_results": binary_results,
-    })
+
+    for batch_idx, (lines, km, bkeys) in enumerate(batch_groups):
+        label = f" ({batch_idx + 1}/{len(batch_groups)})" if len(batch_groups) > 1 else ""
+
+        tmp_path = None
+        jsonl_file = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
+                tmp.write("\n".join(lines) + "\n")
+                tmp_path = Path(tmp.name)
+
+            print(f"Uploading batch requests file{label}...")
+            display = f"batch_requests_{batch_idx}.jsonl" if len(batch_groups) > 1 else "batch_requests.jsonl"
+            jsonl_file = client.files.upload(
+                file=tmp_path,
+                config=types.UploadFileConfig(display_name=display, mime_type="text/plain"),
+            )
+
+            print(f"Submitting batch job{label} (model={args.model})...")
+            batch_job = client.batches.create(model=args.model, src=jsonl_file.name)
+            print(f"Batch job created: {batch_job.name}")
+
+        finally:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink()
+            if jsonl_file:
+                try:
+                    client.files.delete(name=jsonl_file.name)
+                except Exception:
+                    pass
+
+        batch_br = {bk: binary_results[bk] for bk in bkeys}
+        pending.append({
+            "job_name": batch_job.name,
+            "model": args.model,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "num_items": len(lines),
+            "key_map": km,
+            "binary_results": batch_br,
+        })
+
     _save_pending(pending)
 
-    print(f"\nBatch job submitted: {batch_job.name}")
-    print(f"Tracking {len(jsonl_lines)} requests across {len(all_work)} binaries.")
+    total_items = sum(len(lines) for lines, _, _ in batch_groups)
+    print(f"\nSubmitted {total_items} requests in {len(batch_groups)} batch job(s) "
+          f"across {len(all_work)} binaries.")
     print("Run with --retrieve to check results later.")
 
 
@@ -512,6 +555,12 @@ def retrieve_batch_results(client, args):
             # Download results JSONL
             output_file_name = job.dest.file_name
             content = client.files.download(file=output_file_name)
+
+            # Delete output file to free project storage (20 GB limit)
+            try:
+                client.files.delete(name=output_file_name)
+            except Exception:
+                pass
 
             key_map = tracker["key_map"]
             binary_results = tracker["binary_results"]
