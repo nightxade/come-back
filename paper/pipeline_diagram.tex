@@ -56,8 +56,8 @@
 
 \node[annot, left=0.4cm of compile] (variants) {
     \textbullet~\texttt{default}\\
-    \textbullet~\texttt{debug} {\tiny(\texttt{-N -l})}\\
-    \textbullet~\texttt{stripped} {\tiny(\texttt{-s -w})}
+    \textbullet~\texttt{debug} {\small(\texttt{-N -l})}\\
+    \textbullet~\texttt{stripped} {\small(\texttt{-s -w})}
 };
 
 % -- Section 3.2: Decompilation --
@@ -96,11 +96,9 @@
 \coordinate (eval_center) at ($(inferred.south)!0.5!(chunked_src.south) + (0,-1.8)$);
 \node[process] at (eval_center) (eval) {Evaluation};
 
-\node[output, below=1.2cm of eval] (scores) {Scores \&\\statistics};
-
 \node[annot, right=0.4cm of eval] (metrics) {
     \textbullet~CodeBLEU\\
-    \textbullet~LLM-as-judge\\
+    \textbullet~LLM-as-a-Judge\\
     \textbullet~Syntax validity
 };
 
@@ -145,8 +143,6 @@
 \draw[arrow] (inferred) -- (eval);
 \draw[arrow] (chunked_src) -- (eval);
 
-% Evaluation output
-\draw[arrow] (eval) -- (scores);
 
 % ============================================================
 % Phase bounding boxes
@@ -158,7 +154,7 @@
     \node[phase, fit=(strings)(pseudocode)(rodata)] (p3) {};
     \node[phase, fit=(chunk)(chunked_decomp)(chunked_src)(golist)] (p4) {};
     \node[phase, fit=(inference)(inferred)(p5pad)] (p5) {};
-    \node[phase, fit=(eval)(scores)(metrics)] (p6) {};
+    \node[phase, fit=(eval)(metrics)] (p6) {};
 \end{scope}
 
 % Phase labels — just above each box, left-aligned
