@@ -410,7 +410,7 @@ def _plot_score_distributions(df: pd.DataFrame, out: Path):
 def _plot_ast_vs_score(df: pd.DataFrame, bins, col_name: str, xlabel: str,
                        out: Path):
     """Line plot: bin midpoints on x-axis, mean score per metric on y-axis."""
-    score_cols = [c for c in ["llm_score", "codebleu_score"]
+    score_cols = [c for c in ["llm_score", "codebleu_score", "syntax_score"]
                   if c in df.columns]
     if not score_cols or col_name not in df.columns:
         return
@@ -446,7 +446,7 @@ def _plot_ast_vs_score(df: pd.DataFrame, bins, col_name: str, xlabel: str,
 
 
 def _plot_metric_correlation(df: pd.DataFrame, out: Path):
-    """Hex-bin scatter: llm_score vs codebleu_score."""
+    """2D histogram: llm_score vs codebleu_score with log color scale."""
     if "llm_score" not in df.columns or "codebleu_score" not in df.columns:
         return
 
@@ -454,10 +454,14 @@ def _plot_metric_correlation(df: pd.DataFrame, out: Path):
     if len(sub) < 10:
         return
 
+    from matplotlib.colors import LogNorm
+
     fig, ax = plt.subplots(figsize=(5, 5))
-    hb = ax.hexbin(sub["llm_score"], sub["codebleu_score"], gridsize=30,
-                   cmap="YlOrRd", mincnt=1)
-    fig.colorbar(hb, ax=ax, label="Count")
+    h = ax.hist2d(
+        sub["llm_score"], sub["codebleu_score"],
+        bins=50, cmap="YlOrRd", norm=LogNorm(), cmin=1,
+    )
+    fig.colorbar(h[3], ax=ax, label="Count (log scale)")
 
     r, _ = sp_stats.pearsonr(sub["llm_score"], sub["codebleu_score"])
     ax.annotate(f"Pearson r = {r:.3f}", xy=(0.05, 0.95),
@@ -475,31 +479,40 @@ def _plot_metric_correlation(df: pd.DataFrame, out: Path):
 
 
 def _plot_source_len_vs_score(df: pd.DataFrame, out: Path):
-    """Hex-bin scatter: source_len vs score, one subplot per metric, log x-axis."""
+    """Binned line plot: mean score vs log-spaced source length bins."""
     score_cols = [c for c in ["llm_score", "codebleu_score", "syntax_score"]
                   if c in df.columns]
     if not score_cols or "source_len" not in df.columns:
         return
 
-    fig, axes = plt.subplots(1, len(score_cols), figsize=(4 * len(score_cols), 4),
-                             squeeze=False)
-    axes = axes[0]
+    sub = df[df["source_len"].notna() & (df["source_len"] > 0)].copy()
+    if sub.empty:
+        return
 
-    for ax, col in zip(axes, score_cols):
-        sub = df[["source_len", col]].dropna()
-        sub = sub[sub["source_len"] > 0]
-        if len(sub) < 10:
-            continue
-        hb = ax.hexbin(sub["source_len"], sub[col], gridsize=30,
-                       xscale="log", cmap="YlOrRd", mincnt=1)
-        fig.colorbar(hb, ax=ax, label="Count")
-        ax.set_xlabel("Source Length (chars)")
-        ax.set_ylabel("Score")
-        ax.set_title(col.replace("_score", ""))
+    # Create log-spaced bins
+    bin_edges = [0, 50, 100, 200, 500, 1000, 2000, 5000, 10000, float("inf")]
+    bin_labels = ["<50", "50-100", "100-200", "200-500", "500-1K",
+                  "1K-2K", "2K-5K", "5K-10K", "10K+"]
 
-    fig.suptitle("Source Length vs Score", y=1.02)
+    sub["len_bin"] = pd.cut(
+        sub["source_len"], bins=bin_edges, labels=bin_labels, right=False,
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    for col in score_cols:
+        means = sub.groupby("len_bin", observed=True)[col].mean()
+        label = col.replace("_score", "")
+        ax.plot(range(len(means)), means.values, marker="o", label=label)
+
+    ax.set_xticks(range(len(bin_labels)))
+    ax.set_xticklabels(bin_labels, rotation=30, ha="right", fontsize=8)
+    ax.set_xlabel("Source Length (chars)")
+    ax.set_ylabel("Mean Score")
+    ax.set_title("Score vs Source Length")
+    ax.legend()
     fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -563,6 +576,103 @@ def _plot_codebleu_submetrics(df: pd.DataFrame, out: Path):
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out)
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
+def _plot_variant_scores_weighted(df: pd.DataFrame, out: Path):
+    """Grouped bar chart: source-length-weighted mean score per variant."""
+    score_cols = [c for c in ["llm_score", "codebleu_score"] if c in df.columns]
+    if not score_cols:
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    x = np.arange(len(VARIANTS))
+    width = 0.8 / len(score_cols)
+
+    for i, col in enumerate(score_cols):
+        wmeans = []
+        for v in VARIANTS:
+            vdf = df[(df["variant"] == v) & df[col].notna()]
+            if len(vdf) == 0:
+                wmeans.append(0)
+                continue
+            src_lens = vdf["source_len"].fillna(1)
+            w_total = src_lens.sum()
+            wmean = (vdf[col] * src_lens).sum() / w_total if w_total > 0 else vdf[col].mean()
+            wmeans.append(wmean)
+        offset = (i - (len(score_cols) - 1) / 2) * width
+        label = col.replace("_score", "")
+        ax.bar(x + offset, wmeans, width, label=label)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(VARIANTS)
+    ax.set_ylabel("Weighted Mean Score")
+    ax.set_title("Source-Length-Weighted Mean Scores by Variant")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
+def _plot_repo_scores(df: pd.DataFrame, out: Path, top_n: int = 15):
+    """Horizontal bar chart: top and bottom repos by mean LLM score."""
+    if "llm_score" not in df.columns:
+        return
+
+    # Compute per-repo mean across all variants
+    repo_scores = (
+        df[df["llm_score"].notna()]
+        .groupby("repo")
+        .agg(
+            llm_mean=("llm_score", "mean"),
+            codebleu_mean=("codebleu_score", "mean"),
+            count=("llm_score", "size"),
+        )
+    )
+
+    # Require at least 20 functions to avoid noisy single-function repos
+    repo_scores = repo_scores[repo_scores["count"] >= 20]
+
+    if len(repo_scores) < 2:
+        return
+
+    repo_scores = repo_scores.sort_values("llm_mean")
+
+    # Take bottom and top N
+    n = min(top_n, len(repo_scores) // 2)
+    if n < 1:
+        return
+    bottom = repo_scores.head(n)
+    top = repo_scores.tail(n)
+    selected = pd.concat([bottom, top])
+
+    # Shorten repo names (owner/repo)
+    labels = [r.split("/")[-1] if "/" in r else r for r in selected.index]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, max(5, n * 0.4)), sharey=True)
+
+    y = np.arange(len(selected))
+
+    # LLM scores
+    colors = ["#e74c3c" if i < n else "#2ecc71" for i in range(len(selected))]
+    axes[0].barh(y, selected["llm_mean"], color=colors, edgecolor="white", linewidth=0.5)
+    axes[0].set_yticks(y)
+    axes[0].set_yticklabels(labels, fontsize=8)
+    axes[0].set_xlabel("Mean LLM Score")
+    axes[0].set_title("LLM-as-a-Judge")
+    axes[0].set_xlim(0, 1)
+
+    # CodeBLEU scores
+    axes[1].barh(y, selected["codebleu_mean"], color=colors, edgecolor="white", linewidth=0.5)
+    axes[1].set_xlabel("Mean CodeBLEU Score")
+    axes[1].set_title("CodeBLEU")
+    axes[1].set_xlim(0, 1)
+
+    fig.suptitle(f"Top and Bottom {n} Repositories by Mean Score", y=1.02)
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -667,6 +777,8 @@ def main():
     _plot_score_cdfs(df, STATS_DIR / "score_cdfs.png")
     _plot_codebleu_submetrics(df, STATS_DIR / "codebleu_submetrics.png")
     _plot_paired_diffs(df, STATS_DIR / "paired_diffs.png")
+    _plot_variant_scores_weighted(df, STATS_DIR / "variant_scores_weighted.png")
+    _plot_repo_scores(df, STATS_DIR / "repo_scores.png")
 
     print("\nDone. All output in statistics/")
 
