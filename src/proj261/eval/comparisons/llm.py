@@ -12,12 +12,14 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+import html2text
 from tqdm import tqdm
 
 from proj261.util import PROJECT_DIR, DEFAULT_MODEL
@@ -27,6 +29,8 @@ from proj261.util import PROJECT_DIR, DEFAULT_MODEL
 # --------------------------------------------------------------------------- #
 
 _client: genai.Client | None = None
+_api_key: str | None = None
+_thread_local = threading.local()
 _model: str = DEFAULT_MODEL
 _explain: bool = False
 _no_batch: bool = False
@@ -35,6 +39,13 @@ RETRY_BASE = 2
 RETRY_MULT = 2
 RETRY_CAP = 60
 RETRY_MAX = 5
+
+
+def _get_client() -> genai.Client:
+    """Return a thread-local Gemini client to avoid shared SSL issues."""
+    if not hasattr(_thread_local, "client"):
+        _thread_local.client = genai.Client(api_key=_api_key)
+    return _thread_local.client
 
 # --------------------------------------------------------------------------- #
 #  Prompts
@@ -74,15 +85,45 @@ def _build_prompt(source: str, inferred: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+#  Pretty error formatting
+# --------------------------------------------------------------------------- #
+
+_h2t = html2text.HTML2Text()
+_h2t.ignore_links = True
+_h2t.ignore_images = True
+_h2t.body_width = 0
+
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_CYAN = "\033[36m"
+
+
+def _pretty_error(e: Exception) -> str:
+    """Return a compact, readable error string (HTML stripped)."""
+    raw = str(e)
+    if "<" in raw and ">" in raw:
+        text = _h2t.handle(raw).strip()
+        text = re.sub(r"\n{2,}", " | ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        return text
+    return raw
+
+
+# --------------------------------------------------------------------------- #
 #  Gemini call with retry
 # --------------------------------------------------------------------------- #
 
 def _call_gemini(system_prompt: str, contents: str) -> str | None:
     """Call Gemini with exponential backoff.  Returns response text or None."""
+    client = _get_client()
     delay = RETRY_BASE
     for attempt in range(1, RETRY_MAX + 1):
         try:
-            response = _client.models.generate_content(
+            response = client.models.generate_content(
                 model=_model,
                 contents=[contents],
                 config=types.GenerateContentConfig(
@@ -94,18 +135,34 @@ def _call_gemini(system_prompt: str, contents: str) -> str | None:
             return response.text or ""
         except Exception as e:
             code = getattr(e, "code", None) or getattr(e, "status_code", None)
-            retryable = code in (429, 500, 503)
+            retryable = code in (429, 500, 502, 503)
             if not retryable:
                 msg = str(e).lower()
                 retryable = any(
-                    k in msg for k in ("resource exhausted", "overloaded", "unavailable")
+                    k in msg for k in (
+                        "resource exhausted", "overloaded", "unavailable",
+                        "bad gateway", "ssl", "eof",
+                        "connection reset", "connection aborted",
+                        "broken pipe", "timed out", "timeout",
+                    )
                 )
+            err_msg = _pretty_error(e)
+            code_str = f" {_DIM}[{code}]{_RESET}" if code else ""
             if retryable and attempt < RETRY_MAX:
-                tqdm.write(f"    Retry {attempt}/{RETRY_MAX} after {delay}s: {e}")
+                tqdm.write(
+                    f"    {_YELLOW}{_BOLD}RETRY{_RESET} "
+                    f"{_DIM}{attempt}/{RETRY_MAX}{_RESET}{code_str} "
+                    f"{_CYAN}(waiting {delay:.0f}s){_RESET} "
+                    f"{_DIM}{err_msg}{_RESET}"
+                )
                 time.sleep(delay)
                 delay = min(delay * RETRY_MULT, RETRY_CAP)
             else:
-                tqdm.write(f"    LLM judge ERROR (attempt {attempt}): {e}")
+                tqdm.write(
+                    f"    {_RED}{_BOLD}ERROR{_RESET}{code_str} "
+                    f"{_DIM}(attempt {attempt}){_RESET} "
+                    f"{err_msg}"
+                )
                 return None
     return None
 
@@ -152,16 +209,16 @@ def add_args(parser):
 
 def configure(args):
     """Initialize the Gemini client and store settings."""
-    global _client, _model, _explain, _no_batch
+    global _client, _api_key, _model, _explain, _no_batch
 
     load_dotenv(PROJECT_DIR / ".env")
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
+    _api_key = os.environ.get("GEMINI_API_KEY")
+    if not _api_key:
         raise SystemExit(
             "Error: GEMINI_API_KEY not set. Copy .env.example to .env and fill in your key."
         )
 
-    _client = genai.Client(api_key=api_key)
+    _client = genai.Client(api_key=_api_key)
     _model = args.model
     _explain = args.explain
     _no_batch = getattr(args, "no_batch", False)

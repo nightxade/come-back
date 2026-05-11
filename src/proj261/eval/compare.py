@@ -7,7 +7,9 @@ comparison metric, and reports results as JSON + stdout summary.
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -230,6 +232,8 @@ def evaluate_binary(entry, compare_fn, aggregate_fn, metric, force):
 
         # Run comparison
         scores = compare_fn(source_code, inferred_code, decomp_code, metadata)
+        if "source_len" not in scores:
+            scores["source_len"] = len(source_code)
         function_results[file_stem] = scores
 
     # Aggregate
@@ -401,24 +405,29 @@ def submit_batch_evaluation(entries, metric_module, metric, force, aggregate_fn=
     """
     submit_fn = metric_module.submit_batch
 
-    # 1. Collect work from all binaries
+    # 1. Collect work from all binaries (parallel I/O)
     print("Collecting work for batch evaluation...")
     cached_results = []
     binary_metas = []       # parallel with work_ranges
     all_work_items = []     # flat list of work items across all binaries
     work_ranges = []        # (start_idx, count) into all_work_items per binary
 
-    for entry in entries:
-        meta, items = _collect_binary_work(entry, metric, force)
-        if not items:
-            cached_results.append(meta)
-            continue
-        start = len(all_work_items)
-        for item in items:
-            item["key"] = f"k{len(all_work_items):06d}"
-            all_work_items.append(item)
-        work_ranges.append((start, len(items)))
-        binary_metas.append(meta)
+    with ThreadPoolExecutor(max_workers=16) as collect_pool:
+        future_to_entry = {
+            collect_pool.submit(_collect_binary_work, entry, metric, force): entry
+            for entry in entries
+        }
+        for future in as_completed(future_to_entry):
+            meta, items = future.result()
+            if not items:
+                cached_results.append(meta)
+                continue
+            start = len(all_work_items)
+            for item in items:
+                item["key"] = f"k{len(all_work_items):06d}"
+                all_work_items.append(item)
+            work_ranges.append((start, len(items)))
+            binary_metas.append(meta)
 
     if not all_work_items:
         print("All binaries cached or have no comparable functions.")
@@ -641,6 +650,10 @@ def main():
         help="Re-evaluate even if results exist",
     )
     parser.add_argument(
+        "--concurrency", type=int, default=32,
+        help="Max concurrent evaluations for synchronous mode (default: 32)",
+    )
+    parser.add_argument(
         "--retrieve", action="store_true",
         help="Check pending batch jobs and download completed results",
     )
@@ -698,15 +711,193 @@ def main():
             entries, metric_module, args.metric, args.force,
             aggregate_fn=aggregate_fn,
         )
+    elif getattr(metric_module, "cpu_bound", False):
+        # CPU-bound metrics: parallelize at the function level with processes.
+        # Binary-level parallelism leaves massive binaries as stragglers.
+        concurrency = min(args.concurrency, os.cpu_count() or 4)
+
+        # 1. Collect all work items across binaries (I/O — threaded)
+        print("Collecting work items...")
+        all_work = []       # (binary_idx, file_stem, source, inferred, decomp, metadata)
+        binary_infos = []   # per non-cached binary
+        cached_results = []
+
+        def _collect_one_binary(entry):
+            """Return (cached_result, None) or (binary_info, work_items)."""
+            repo = entry["repo"]
+            variant = entry["variant"]
+            binary = entry["binary"]
+            sname = safe_name(repo)
+
+            source_dir = Path(entry["source_dir"])
+            decomp_dir = Path(entry["decomp_dir"])
+            inference_dir = PRED_DIR / sname / variant / binary
+
+            results_dir = RESULTS_DIR / args.metric / sname / variant
+            results_path = results_dir / f"{binary}.json"
+
+            if not args.force and results_path.exists():
+                try:
+                    existing = json.loads(results_path.read_text())
+                    stale = False
+                    if existing.get("skipped_no_inference", 0) > 0:
+                        inf_meta = inference_dir / "metadata.json"
+                        if inf_meta.exists() and inf_meta.stat().st_mtime > results_path.stat().st_mtime:
+                            stale = True
+                    if not stale:
+                        if _backfill_source_len(existing, source_dir):
+                            all_scores = list(existing.get("functions", {}).values())
+                            existing["aggregate"] = aggregate_fn(all_scores) if all_scores else aggregate_fn([])
+                            results_path.write_text(json.dumps(existing, indent=2))
+                        return existing, None
+                except json.JSONDecodeError:
+                    pass
+
+            source_manifest = json.loads((source_dir / "manifest.json").read_text())
+            decomp_manifest = json.loads((decomp_dir / "manifest.json").read_text())
+
+            source_by_stem = {}
+            for src_entry in source_manifest["functions"]:
+                stem = src_entry["file"].removesuffix(".go")
+                source_by_stem[stem] = src_entry
+
+            skipped_no_source = 0
+            skipped_no_inference = 0
+            items = []
+
+            for decomp_entry in decomp_manifest["functions"]:
+                file_stem = decomp_entry["file"].removesuffix(".c")
+                src_entry = source_by_stem.get(file_stem)
+                if src_entry is None:
+                    skipped_no_source += 1
+                    continue
+
+                source_file = source_dir / src_entry["file"]
+                if not source_file.exists():
+                    skipped_no_source += 1
+                    continue
+                source_code = source_file.read_text()
+
+                inference_file = inference_dir / f"{file_stem}.go"
+                if not inference_file.exists():
+                    skipped_no_inference += 1
+                    continue
+                inferred_code = inference_file.read_text()
+
+                decomp_file = decomp_dir / decomp_entry["file"]
+                decomp_code = decomp_file.read_text() if decomp_file.exists() else ""
+
+                metadata = {
+                    "source_function": decomp_entry.get("source_function", ""),
+                    "functions": decomp_entry.get("functions", []),
+                    "package": decomp_entry.get("package", ""),
+                    "estimated_tokens": decomp_entry.get("estimated_tokens", 0),
+                }
+
+                items.append((file_stem, source_code, inferred_code, decomp_code, metadata))
+
+            binfo = {
+                "entry": entry,
+                "skipped_no_source": skipped_no_source,
+                "skipped_no_inference": skipped_no_inference,
+            }
+            return binfo, items
+
+        with ThreadPoolExecutor(max_workers=32) as io_pool:
+            for result_or_info, items in tqdm(
+                io_pool.map(_collect_one_binary, entries),
+                total=len(entries), desc="Collecting", unit="bin",
+            ):
+                if items is None:
+                    cached_results.append(result_or_info)
+                else:
+                    bin_idx = len(binary_infos)
+                    binary_infos.append(result_or_info)
+                    for file_stem, source, inferred, decomp, meta in items:
+                        all_work.append((bin_idx, file_stem, source, inferred, decomp, meta))
+
+        if not all_work:
+            print("All binaries cached or have no comparable functions.")
+            if cached_results:
+                print_summary(cached_results, aggregate_fn)
+        else:
+            print(f"Evaluating {len(all_work)} functions across "
+                  f"{len(binary_infos)} binaries ({len(cached_results)} cached), "
+                  f"using {concurrency} processes...")
+
+            # 2. Fan out individual compare_fn calls across process pool
+            function_scores = [None] * len(all_work)
+            with ProcessPoolExecutor(max_workers=concurrency) as pool:
+                futures = {
+                    pool.submit(compare_fn, w[2], w[3], w[4], w[5]): i
+                    for i, w in enumerate(all_work)
+                }
+                for future in tqdm(as_completed(futures), total=len(futures),
+                                   desc="Comparing", unit="fn"):
+                    idx = futures[future]
+                    try:
+                        scores = future.result()
+                        if "source_len" not in scores:
+                            scores["source_len"] = len(all_work[idx][2])
+                        function_scores[idx] = scores
+                    except Exception as exc:
+                        function_scores[idx] = {"score": -1, "error": str(exc)}
+
+            # 3. Reassemble per-binary results and write
+            results = list(cached_results)
+            for bin_idx, binfo in enumerate(binary_infos):
+                entry = binfo["entry"]
+                sname = safe_name(entry["repo"])
+                results_dir = RESULTS_DIR / args.metric / sname / entry["variant"]
+                results_path = results_dir / f"{entry['binary']}.json"
+
+                fn_results = {}
+                for work_idx, (bidx, file_stem, *_rest) in enumerate(all_work):
+                    if bidx == bin_idx:
+                        fn_results[file_stem] = function_scores[work_idx]
+
+                all_scores = list(fn_results.values())
+                aggregate = aggregate_fn(all_scores) if all_scores else aggregate_fn([])
+
+                result = {
+                    "repo": entry["repo"],
+                    "variant": entry["variant"],
+                    "binary": entry["binary"],
+                    "metric": args.metric,
+                    "total_compared": len(fn_results),
+                    "skipped_no_source": binfo["skipped_no_source"],
+                    "skipped_no_inference": binfo["skipped_no_inference"],
+                    "aggregate": aggregate,
+                    "functions": fn_results,
+                }
+
+                results_dir.mkdir(parents=True, exist_ok=True)
+                results_path.write_text(json.dumps(result, indent=2))
+                results.append(result)
+
+            print_summary(results, aggregate_fn)
     else:
+        # I/O-bound metrics: thread-level parallelism at binary granularity
+        concurrency = args.concurrency
         results = []
-        for entry in tqdm(entries, desc="Evaluating", unit="bin"):
-            tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
-            result = evaluate_binary(
-                entry, compare_fn, aggregate_fn,
-                args.metric, args.force,
-            )
-            results.append(result)
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(
+                    evaluate_binary, entry, compare_fn, aggregate_fn,
+                    args.metric, args.force,
+                ): entry
+                for entry in entries
+            }
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="Evaluating", unit="bin"):
+                entry = futures[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
+                except Exception as exc:
+                    tqdm.write(f"  ERROR {entry['repo']} {entry['binary']}: {exc}")
 
         print_summary(results, aggregate_fn)
 

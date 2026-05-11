@@ -11,8 +11,10 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -23,7 +25,30 @@ from proj261.util import METADATA_PATH, CHUNKED_DECOMPS_DIR, PRED_DIR, PROJECT_D
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+import html2text
 from tqdm import tqdm
+
+# --------------------------------------------------------------------------- #
+#  DNS cache (avoids resolver exhaustion under high concurrency)
+# --------------------------------------------------------------------------- #
+
+_dns_cache: dict[tuple, list] = {}
+_dns_lock = threading.Lock()
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _cached_getaddrinfo(*args, **kwargs):
+    key = (args, tuple(sorted(kwargs.items())))
+    with _dns_lock:
+        if key in _dns_cache:
+            return _dns_cache[key]
+    result = _original_getaddrinfo(*args, **kwargs)
+    with _dns_lock:
+        _dns_cache[key] = result
+    return result
+
+
+socket.getaddrinfo = _cached_getaddrinfo
 
 # --------------------------------------------------------------------------- #
 #  Configuration
@@ -186,6 +211,57 @@ def get_chunks_for_binary_impl(entry):
 #  Gemini call with retry
 # --------------------------------------------------------------------------- #
 
+_h2t = html2text.HTML2Text()
+_h2t.ignore_links = True
+_h2t.ignore_images = True
+_h2t.body_width = 0
+
+# ANSI escape helpers
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_CYAN = "\033[36m"
+
+
+def _pretty_error(e: Exception) -> str:
+    """Return a compact, readable error string (HTML stripped)."""
+    raw = str(e)
+    if "<" in raw and ">" in raw:
+        text = _h2t.handle(raw).strip()
+        # Collapse whitespace / blank lines
+        text = re.sub(r"\n{2,}", " | ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        # Strip markdown bold (**) since we use ANSI bold instead
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        return text
+    return raw
+
+
+def _fmt_retry(attempt: int, max_attempts: int, delay: float, e: Exception) -> str:
+    msg = _pretty_error(e)
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    code_str = f" {_DIM}[{code}]{_RESET}" if code else ""
+    return (
+        f"    {_YELLOW}{_BOLD}RETRY{_RESET} "
+        f"{_DIM}{attempt}/{max_attempts}{_RESET}{code_str} "
+        f"{_CYAN}(waiting {delay:.0f}s){_RESET} "
+        f"{_DIM}{msg}{_RESET}"
+    )
+
+
+def _fmt_error(attempt: int, e: Exception) -> str:
+    msg = _pretty_error(e)
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    code_str = f" {_DIM}[{code}]{_RESET}" if code else ""
+    return (
+        f"    {_RED}{_BOLD}ERROR{_RESET}{code_str} "
+        f"{_DIM}(attempt {attempt}){_RESET} "
+        f"{msg}"
+    )
+
+
 def call_gemini(
     client: genai.Client,
     model: str,
@@ -208,19 +284,23 @@ def call_gemini(
             return response
         except Exception as e:
             code = getattr(e, "code", None) or getattr(e, "status_code", None)
-            retryable = code in (429, 500, 503)
+            retryable = code in (429, 500, 502, 503)
             # Also retry on common transient message patterns
             if not retryable:
                 msg = str(e).lower()
                 retryable = any(
-                    k in msg for k in ("resource exhausted", "overloaded", "unavailable")
+                    k in msg for k in (
+                        "resource exhausted", "overloaded", "unavailable",
+                        "ssl", "eof", "connection reset", "connection aborted",
+                        "broken pipe", "timed out", "timeout",
+                    )
                 )
             if retryable and attempt < RETRY_MAX:
-                tqdm.write(f"    Retry {attempt}/{RETRY_MAX} after {delay}s: {e}")
+                tqdm.write(_fmt_retry(attempt, RETRY_MAX, delay, e))
                 time.sleep(delay)
                 delay = min(delay * RETRY_MULT, RETRY_CAP)
             else:
-                tqdm.write(f"    ERROR (attempt {attempt}): {e}")
+                tqdm.write(_fmt_error(attempt, e))
                 return None
     return None
 
@@ -277,46 +357,60 @@ def process_binary(
         "total_output_tokens": 0,
     }
 
-    # Determine chunks to process
+    # Determine chunks to process, skipping already-done functions
     chunks = get_chunks_for_binary_impl(entry)
-
+    pending = []
     for rel_path, code_block in chunks:
         out_file = out_dir / f"{rel_path}.go"
-
-        # Per-function resumability
         if not force and out_file.exists() and out_file.stat().st_size > 0:
             result["functions"][rel_path] = {"status": "skipped"}
-            continue
+        else:
+            pending.append((rel_path, code_block))
 
-        # Check call budget
-        if call_budget is not None and call_budget[0] <= 0:
-            break
+    # Apply call budget up-front and deduct the whole batch atomically
+    if call_budget is not None:
+        allowed = call_budget[0]
+        if allowed <= 0:
+            pending = []
+        elif len(pending) > allowed:
+            pending = pending[:allowed]
+        call_budget[0] -= len(pending)
 
-        response = call_gemini(client, model, SYSTEM_PROMPT, [code_block], max_output_tokens)
-        if call_budget is not None:
-            call_budget[0] -= 1
+    if pending:
+        def _call_one(rel_path, code_block):
+            return rel_path, call_gemini(
+                client, model, SYSTEM_PROMPT, [code_block], max_output_tokens
+            )
 
-        if response is None:
-            result["functions"][rel_path] = {"status": "error"}
-            continue
+        # Fan out all functions for this binary as concurrent requests, then
+        # await all of them together before writing results.
+        with ThreadPoolExecutor(max_workers=min(len(pending), 8)) as inner_pool:
+            futures = {
+                inner_pool.submit(_call_one, rp, cb): rp
+                for rp, cb in pending
+            }
+            for future in as_completed(futures):
+                rel_path, response = future.result()
 
-        # Extract text and token counts
-        text = response.text or ""
-        text = strip_code_fences(text)
+                if response is None:
+                    result["functions"][rel_path] = {"status": "error"}
+                    continue
 
-        usage = response.usage_metadata
-        in_tok = usage.prompt_token_count if usage else 0
-        out_tok = usage.candidates_token_count if usage else 0
-        result["total_input_tokens"] += in_tok
-        result["total_output_tokens"] += out_tok
+                text = strip_code_fences(response.text or "")
+                usage = response.usage_metadata
+                in_tok = (usage.prompt_token_count or 0) if usage else 0
+                out_tok = (usage.candidates_token_count or 0) if usage else 0
+                result["total_input_tokens"] += in_tok
+                result["total_output_tokens"] += out_tok
 
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-        out_file.write_text(text)
-        result["functions"][rel_path] = {
-            "status": "ok",
-            "input_tokens": in_tok,
-            "output_tokens": out_tok,
-        }
+                out_file = out_dir / f"{rel_path}.go"
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                out_file.write_text(text)
+                result["functions"][rel_path] = {
+                    "status": "ok",
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                }
 
     # Check if all functions succeeded
     statuses = {v["status"] for v in result["functions"].values()}
@@ -518,8 +612,7 @@ def submit_batch_inference(client, entries, args):
             "key_map": km,
             "binary_results": batch_br,
         })
-
-    _save_pending(pending)
+        _save_pending(pending)
 
     total_items = sum(len(lines) for lines, _, _ in batch_groups)
     print(f"\nSubmitted {total_items} requests in {len(batch_groups)} batch job(s) "
@@ -591,8 +684,8 @@ def retrieve_batch_results(client, args):
                         out_file.write_text(text)
 
                         usage = resp.get("usageMetadata", {})
-                        in_tok = usage.get("promptTokenCount", 0)
-                        out_tok = usage.get("candidatesTokenCount", 0)
+                        in_tok = usage.get("promptTokenCount") or 0
+                        out_tok = usage.get("candidatesTokenCount") or 0
 
                         res_meta["functions"][rel_path] = {
                             "status": "ok",
@@ -718,8 +811,10 @@ def main():
                         help="Limit number of repos to process")
     parser.add_argument("--max-binaries", type=int, default=None,
                         help="Limit total number of binaries to process")
-    parser.add_argument("--threads", type=int, default=1,
-                        help="Parallel threads for synchronous mode (default: 1)")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="(deprecated, use --concurrency) Alias for --concurrency")
+    parser.add_argument("--concurrency", type=int, default=32,
+                        help="Max concurrent API requests for synchronous mode (default: 32)")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if output already exists")
     parser.add_argument("--max-calls", type=int, default=None,
@@ -758,72 +853,129 @@ def main():
         submit_batch_inference(client, entries, args)
         return
 
-    # Synchronous mode (filtered for resumability)
-    if not args.force:
-        pending = []
-        for e in entries:
-            sname = safe_name(e["repo"])
-            meta_path = PRED_DIR / sname / e["variant"] / e["binary"] / "metadata.json"
-            if meta_path.exists():
-                try:
-                    existing = json.loads(meta_path.read_text())
-                    if existing.get("status") == "completed":
-                        continue
-                except json.JSONDecodeError:
-                    pass
-            pending.append(e)
-        entries = pending
+    # Synchronous mode — flatten all chunks into a single global pool
+    concurrency = args.threads if args.threads is not None else args.concurrency
 
-    if not entries:
+    # Collect all (entry, rel_path, code_block) work items, respecting resumability
+    all_work = []  # (entry, rel_path, code_block, out_file)
+    for e in entries:
+        sname = safe_name(e["repo"])
+        out_dir = PRED_DIR / sname / e["variant"] / e["binary"]
+        meta_path = out_dir / "metadata.json"
+
+        if not args.force and meta_path.exists():
+            try:
+                existing = json.loads(meta_path.read_text())
+                if existing.get("status") == "completed":
+                    continue
+            except json.JSONDecodeError:
+                pass
+
+        chunks = get_chunks_for_binary_impl(e)
+        for rel_path, code_block in chunks:
+            out_file = out_dir / f"{rel_path}.go"
+            if not args.force and out_file.exists() and out_file.stat().st_size > 0:
+                continue
+            all_work.append((e, rel_path, code_block, out_file))
+
+    # Apply --max-calls limit
+    if args.max_calls is not None:
+        all_work = all_work[:args.max_calls]
+
+    if not all_work:
         print("Nothing to process (all outputs exist or no matching binaries found).")
         return
 
-    n_threads = max(1, args.threads)
-    call_budget = [args.max_calls] if args.max_calls is not None else None
-
-    print(f"Processing {len(entries)} binaries with model={args.model}, "
-          f"threads={n_threads} (SYNC MODE)")
-
-    # Cost estimate
-    all_chunk_texts = []
-    for entry in entries:
-        for _, code_block in get_chunks_for_binary_impl(entry):
-            all_chunk_texts.append(code_block)
-    if all_chunk_texts:
-        _print_cost_estimate(client, args.model, len(all_chunk_texts),
-                             all_chunk_texts, batch=False)
-    del all_chunk_texts
+    print(f"Processing {len(all_work)} chunks across {len(entries)} binaries "
+          f"with model={args.model}, concurrency={concurrency} (SYNC MODE)")
 
     if args.dry_run:
         return
 
-    results = []
+    # Thread-local clients to avoid shared SSL connection issues
+    _thread_local = threading.local()
+    api_key = os.environ["GEMINI_API_KEY"]
 
-    def _do_one(entry):
-        return process_binary(client, entry, args.model, args.force,
-                              args.max_output_tokens, call_budget)
+    def _get_client():
+        if not hasattr(_thread_local, "client"):
+            _thread_local.client = genai.Client(api_key=api_key)
+        return _thread_local.client
 
-    if n_threads == 1:
-        for entry in tqdm(entries, desc="Inferring", unit="bin"):
-            if call_budget is not None and call_budget[0] <= 0:
-                break
-            tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
-            results.append(_do_one(entry))
-    else:
-        with ThreadPoolExecutor(max_workers=n_threads) as pool:
-            futures = {pool.submit(_do_one, e): e for e in entries}
-            for future in tqdm(as_completed(futures), total=len(entries),
-                               desc="Inferring", unit="bin"):
-                entry = futures[future]
-                tqdm.write(f"  {entry['repo']}  {entry['variant']}/{entry['binary']}")
-                try:
-                    results.append(future.result())
-                except Exception as exc:
-                    tqdm.write(f"    THREAD ERROR: {exc}")
-                    results.append({"binary": entry["binary"], "status": "error"})
+    # Track results per binary for metadata writing
+    binary_results: dict[str, dict] = {}  # key -> result dict
+    results_lock = threading.Lock()
+
+    def _get_or_create_result(entry):
+        key = f"{entry['repo']}|{entry['variant']}|{entry['binary']}"
+        with results_lock:
+            if key not in binary_results:
+                binary_results[key] = {
+                    "repo": entry["repo"],
+                    "variant": entry["variant"],
+                    "binary": entry["binary"],
+                    "model": args.model,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "functions": {},
+                    "status": "in_progress",
+                    "total_input_tokens": 0,
+                    "total_output_tokens": 0,
+                }
+        return binary_results[key]
+
+    def _process_chunk(work_item):
+        entry, rel_path, code_block, out_file = work_item
+        result = _get_or_create_result(entry)
+
+        response = call_gemini(
+            _get_client(), args.model, SYSTEM_PROMPT, [code_block], args.max_output_tokens
+        )
+
+        if response is None:
+            with results_lock:
+                result["functions"][rel_path] = {"status": "error"}
+            return
+
+        text = strip_code_fences(response.text or "")
+        usage = response.usage_metadata
+        in_tok = (usage.prompt_token_count or 0) if usage else 0
+        out_tok = (usage.candidates_token_count or 0) if usage else 0
+
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(text)
+
+        with results_lock:
+            result["functions"][rel_path] = {
+                "status": "ok",
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+            }
+            result["total_input_tokens"] += in_tok
+            result["total_output_tokens"] += out_tok
+
+    # Execute all chunks through a single global pool
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(_process_chunk, w): w for w in all_work}
+        for future in tqdm(as_completed(futures), total=len(futures),
+                           desc="Inferring", unit="fn"):
+            try:
+                future.result()
+            except Exception as exc:
+                w = futures[future]
+                tqdm.write(f"    ERROR {w[1]}: {exc}")
+
+    # Finalize per-binary metadata
+    for key, result in binary_results.items():
+        statuses = {v["status"] for v in result["functions"].values()}
+        result["status"] = "partial" if "error" in statuses else "completed"
+        result["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+        repo, variant, binary = key.split("|", 2)
+        meta_path = PRED_DIR / safe_name(repo) / variant / binary / "metadata.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(result, indent=2))
 
     # Summary
-    print_summary(results, model=args.model, batch=False)
+    print_summary(list(binary_results.values()), model=args.model, batch=False)
 
 
 def print_summary(results, model: str = "", batch: bool = False):

@@ -8,7 +8,9 @@ results, and displays per-bin statistics.
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import tree_sitter_go
@@ -180,14 +182,14 @@ def main():
         print("No matching binaries found.")
         sys.exit(1)
 
-    # Collect (ast_size, ast_depth, score, source_len) per function
-    size_records = []   # (ast_size, score, source_len)
-    depth_records = []  # (ast_depth, score, source_len)
-    total_funcs = 0
+    # Collect (source_code, score, source_len) per function using threaded I/O,
+    # then compute AST metrics in parallel across processes.
+    work = []           # (source_code, score, source_len)
     skipped_no_result = 0
     skipped_no_source = 0
 
-    for entry in entries:
+    def _collect_one_binary(entry):
+        """Return (items, no_result, no_source) for a single binary."""
         repo = entry["repo"]
         variant = entry["variant"]
         binary = entry["binary"]
@@ -195,12 +197,13 @@ def main():
 
         result_path = RESULTS_DIR / args.metric / sname / variant / f"{binary}.json"
         if not result_path.exists():
-            skipped_no_result += 1
-            continue
+            return [], 1, 0
 
         result = json.loads(result_path.read_text())
         source_dir = CHUNKED_SOURCES_DIR / sname / variant / binary
 
+        items = []
+        no_source = 0
         for stem, fres in result.get("functions", {}).items():
             score = fres.get("score")
             if score is None or score < 0:
@@ -209,15 +212,40 @@ def main():
             source_len = fres.get("source_len", 0)
             src_file = source_dir / f"{stem}.go"
             if not src_file.exists():
-                skipped_no_source += 1
+                no_source += 1
                 continue
 
-            source_code = src_file.read_text()
-            node_count, max_depth = _compute_ast_metrics(source_code)
+            items.append((src_file.read_text(), score, source_len))
 
+        return items, 0, no_source
+
+    with ThreadPoolExecutor(max_workers=32) as io_pool:
+        for items, no_result, no_source in io_pool.map(_collect_one_binary, entries):
+            work.extend(items)
+            skipped_no_result += no_result
+            skipped_no_source += no_source
+
+    if not work:
+        print("No functions with valid scores and source files found.")
+        sys.exit(1)
+
+    # Fan out AST computation across processes
+    concurrency = os.cpu_count() or 4
+    size_records = []
+    depth_records = []
+
+    with ProcessPoolExecutor(max_workers=concurrency) as pool:
+        futures = {
+            pool.submit(_compute_ast_metrics, src): (src, score, src_len)
+            for src, score, src_len in work
+        }
+        for future in as_completed(futures):
+            _, score, source_len = futures[future]
+            node_count, max_depth = future.result()
             size_records.append((node_count, score, source_len))
             depth_records.append((max_depth, score, source_len))
-            total_funcs += 1
+
+    total_funcs = len(size_records)
 
     if not size_records:
         print("No functions with valid scores and source files found.")

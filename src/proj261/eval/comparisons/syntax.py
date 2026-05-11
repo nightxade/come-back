@@ -12,6 +12,8 @@ from tree_sitter import Language, Parser
 
 GO_LANGUAGE = Language(tree_sitter_go.language())
 
+cpu_bound = True
+
 
 def _make_parser() -> Parser:
     return Parser(GO_LANGUAGE)

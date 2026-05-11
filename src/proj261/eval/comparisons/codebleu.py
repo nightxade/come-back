@@ -13,6 +13,8 @@ from codebleu import calc_codebleu
 # codebleu logs to the root logger so we raise its level globally.
 logging.getLogger().setLevel(logging.ERROR)
 
+cpu_bound = True
+
 
 def compare_functions(
     source: str,

@@ -8,7 +8,9 @@ and generates plots.  All output goes to the ``statistics/`` directory.
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import matplotlib
@@ -37,91 +39,116 @@ STATS_DIR = PROJECT_DIR / "statistics"
 #  Data loading
 # --------------------------------------------------------------------------- #
 
+def _load_one_binary(entry):
+    """Load result JSONs and source files for one binary (I/O only).
+
+    Returns (records_dict, ast_work) where ast_work is a list of
+    (key, source_code) pairs needing AST computation.
+    """
+    repo = entry["repo"]
+    variant = entry["variant"]
+    binary = entry["binary"]
+    sname = safe_name(repo)
+    source_dir = CHUNKED_SOURCES_DIR / sname / variant / binary
+
+    records: dict[tuple, dict] = {}
+
+    for metric in METRICS:
+        result_path = (
+            RESULTS_DIR / metric / sname / variant / f"{binary}.json"
+        )
+        if not result_path.exists():
+            continue
+
+        result = json.loads(result_path.read_text())
+        for stem, fres in result.get("functions", {}).items():
+            score = fres.get("score")
+            if score is None or score < 0:
+                continue
+
+            key = (repo, variant, binary, stem)
+            if key not in records:
+                records[key] = {
+                    "repo": repo,
+                    "variant": variant,
+                    "binary": binary,
+                    "stem": stem,
+                    "source_len": fres.get("source_len", np.nan),
+                    "ast_node_count": np.nan,
+                    "ast_depth": np.nan,
+                }
+
+            rec = records[key]
+
+            # Metric scores
+            if metric == "llm":
+                rec["llm_score"] = score
+            elif metric == "codebleu":
+                rec["codebleu_score"] = score
+                rec["codebleu_ngram"] = fres.get("ngram_match", np.nan)
+                rec["codebleu_weighted_ngram"] = fres.get(
+                    "weighted_ngram_match", np.nan
+                )
+                rec["codebleu_syntax_match"] = fres.get(
+                    "syntax_match", np.nan
+                )
+                rec["codebleu_dataflow"] = fres.get(
+                    "dataflow_match", np.nan
+                )
+            elif metric == "syntax":
+                rec["syntax_score"] = score
+                rec["syntax_valid"] = fres.get("valid")
+                rec["syntax_error_count"] = fres.get("error_count", np.nan)
+                rec["syntax_node_count"] = fres.get("node_count", np.nan)
+
+            # Update source_len if we got a better value
+            sl = fres.get("source_len")
+            if sl is not None and pd.isna(rec.get("source_len", np.nan)):
+                rec["source_len"] = sl
+
+    # Read source files for AST computation (I/O only, defer compute)
+    ast_work = []
+    for key, rec in records.items():
+        if not pd.isna(rec["ast_node_count"]):
+            continue
+        src_file = source_dir / f"{rec['stem']}.go"
+        if src_file.exists():
+            ast_work.append((key, src_file.read_text()))
+
+    return records, ast_work
+
+
 def _load_all_results(entries: list[dict]) -> pd.DataFrame:
     """Load result JSONs for all metrics and build a unified DataFrame.
 
     One row per (repo, variant, binary, stem) with columns for each metric's
     scores, plus source_len and AST metrics from the source file.
     """
-    # Accumulate per-function records keyed by (repo, variant, binary, stem).
-    # Each record merges data across metrics.
+    # 1. Threaded I/O: load all result JSONs and source files
     records: dict[tuple, dict] = {}
+    all_ast_work = []  # (key, source_code)
 
-    for entry in entries:
-        repo = entry["repo"]
-        variant = entry["variant"]
-        binary = entry["binary"]
-        sname = safe_name(repo)
-        source_dir = CHUNKED_SOURCES_DIR / sname / variant / binary
-
-        for metric in METRICS:
-            result_path = (
-                RESULTS_DIR / metric / sname / variant / f"{binary}.json"
-            )
-            if not result_path.exists():
-                continue
-
-            result = json.loads(result_path.read_text())
-            for stem, fres in result.get("functions", {}).items():
-                score = fres.get("score")
-                if score is None or score < 0:
-                    continue
-
-                key = (repo, variant, binary, stem)
-                if key not in records:
-                    records[key] = {
-                        "repo": repo,
-                        "variant": variant,
-                        "binary": binary,
-                        "stem": stem,
-                        "source_len": fres.get("source_len", np.nan),
-                        "ast_node_count": np.nan,
-                        "ast_depth": np.nan,
-                    }
-
-                rec = records[key]
-
-                # Metric scores
-                if metric == "llm":
-                    rec["llm_score"] = score
-                elif metric == "codebleu":
-                    rec["codebleu_score"] = score
-                    rec["codebleu_ngram"] = fres.get("ngram_match", np.nan)
-                    rec["codebleu_weighted_ngram"] = fres.get(
-                        "weighted_ngram_match", np.nan
-                    )
-                    rec["codebleu_syntax_match"] = fres.get(
-                        "syntax_match", np.nan
-                    )
-                    rec["codebleu_dataflow"] = fres.get(
-                        "dataflow_match", np.nan
-                    )
-                elif metric == "syntax":
-                    rec["syntax_score"] = score
-                    rec["syntax_valid"] = fres.get("valid")
-                    rec["syntax_error_count"] = fres.get("error_count", np.nan)
-                    rec["syntax_node_count"] = fres.get("node_count", np.nan)
-
-                # Update source_len if we got a better value
-                sl = fres.get("source_len")
-                if sl is not None and pd.isna(rec.get("source_len", np.nan)):
-                    rec["source_len"] = sl
-
-        # Compute AST metrics from source files for functions in this binary
-        for key, rec in records.items():
-            if key[0] != repo or key[1] != variant or key[2] != binary:
-                continue
-            if not pd.isna(rec["ast_node_count"]):
-                continue
-            src_file = source_dir / f"{rec['stem']}.go"
-            if src_file.exists():
-                source_code = src_file.read_text()
-                nc, depth = _compute_ast_metrics(source_code)
-                rec["ast_node_count"] = nc
-                rec["ast_depth"] = depth
+    with ThreadPoolExecutor(max_workers=32) as io_pool:
+        for bin_records, ast_work in io_pool.map(_load_one_binary, entries):
+            records.update(bin_records)
+            all_ast_work.extend(ast_work)
 
     if not records:
         return pd.DataFrame()
+
+    # 2. Process-pool the CPU-bound AST computation
+    if all_ast_work:
+        concurrency = os.cpu_count() or 4
+        with ProcessPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(_compute_ast_metrics, src): key
+                for key, src in all_ast_work
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                nc, depth = future.result()
+                records[key]["ast_node_count"] = nc
+                records[key]["ast_depth"] = depth
 
     df = pd.DataFrame(list(records.values()))
     return df
