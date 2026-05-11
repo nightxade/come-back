@@ -183,7 +183,7 @@ Our final dataset comprises 128 repositories and 1,665 unique binaries, yielding
 === Aggregate Scores
 
 #figure(
-  image("statistics/score_distributions.png", width: 100%),
+  image("statistics/score_distributions.svg", width: 100%),
   caption: [Score distributions by variant across all three metrics. Boxes span Q1--Q3; whiskers extend to 1.5$times$IQR.],
   placement: auto,
 ) <fig:score-distributions>
@@ -193,7 +193,7 @@ Our final dataset comprises 128 repositories and 1,665 unique binaries, yielding
 === Effect of Build Variant
 
 #figure(
-  image("statistics/paired_diffs.png", width: 100%),
+  image("statistics/paired_diffs.svg", width: 100%),
   caption: [Distribution of paired score differences (default $minus$ stripped) for the same function across build variants.],
   placement: auto,
 ) <fig:paired-diffs>
@@ -203,13 +203,13 @@ To isolate the effect of compilation flags, we perform paired comparisons betwee
 === Complexity Analysis
 
 #figure(
-  image("statistics/ast_size_vs_score.png", width: 85%),
+  image("statistics/ast_size_vs_score.svg", width: 85%),
   caption: [Mean scores by ground-truth AST node count. LLM and CodeBLEU degrade substantially with complexity; syntax validity remains high.],
   placement: auto,
 ) <fig:ast-size>
 
 #figure(
-  image("statistics/ast_depth_vs_score.png", width: 85%),
+  image("statistics/ast_depth_vs_score.svg", width: 85%),
   caption: [Mean scores by ground-truth AST tree depth. LLM and CodeBLEU degrade substantially with complexity; syntax validity remains high.],
   placement: auto,
 ) <fig:ast-depth>
@@ -217,7 +217,7 @@ To isolate the effect of compilation flags, we perform paired comparisons betwee
 Both semantic similarity metrics exhibit a strong inverse relationship with source code complexity. @fig:ast-size plots mean scores against ground-truth AST node count, while @fig:ast-depth plots mean scores against ground-truth AST tree depth. Functions with 25--50 AST nodes score highest (0.80 LLM, 0.75 CodeBLEU), while functions exceeding 500 nodes score roughly half as well (0.32 LLM, 0.35 CodeBLEU). The relationship with AST depth is similar: functions of depth 5--10 average 0.76 (LLM) and 0.71 (CodeBLEU), declining to 0.27 and 0.29 at depths above 25. This is consistent with the Spearman correlations of $rho = -0.51$ (AST node count vs. LLM) and $rho = -0.50$ (AST node count vs. CodeBLEU). Notably, the smallest functions ([1, 25) nodes) score slightly lower than the [25, 50) bin; these are typically trivial getter/setter or stub functions where the ground truth is a single return statement, and the LLM may over-generate. Syntax validity remains high across all bins, dipping only to 98.4% for functions above 500 nodes.
 
 #figure(
-  image("statistics/source_len_vs_score.png", width: 85%),
+  image("statistics/source_len_vs_score.svg", width: 85%),
   caption: [Mean scores by source length (characters). The strong negative trend for LLM and CodeBLEU mirrors the AST-complexity results; syntax validity is largely unaffected.],
   placement: auto,
 ) <fig:source-len>
@@ -227,7 +227,7 @@ Both semantic similarity metrics exhibit a strong inverse relationship with sour
 === CodeBLEU Sub-Metric Breakdown
 
 #figure(
-  image("statistics/codebleu_submetrics.png", width: 85%),
+  image("statistics/codebleu_submetrics.svg", width: 85%),
   caption: [CodeBLEU sub-metric breakdown by variant. Structural metrics (syntax match, dataflow) score higher than lexical metrics (n-gram, weighted n-gram).],
   placement: auto,
 ) <fig:codebleu-sub>
@@ -237,7 +237,7 @@ Decomposing CodeBLEU into its four sub-metrics (@fig:codebleu-sub) reveals that 
 === Metric Agreement
 
 #figure(
-  image("statistics/metric_correlation.png", width: 85%),
+  image("statistics/metric_correlation.svg", width: 85%),
   caption: [Joint distribution of LLM-as-a-Judge and CodeBLEU scores across all evaluated functions. The strong positive correlation (Pearson $r = 0.77$) indicates that both metrics capture similar underlying quality.],
   placement: auto,
 ) <fig:metric-corr>
@@ -247,7 +247,7 @@ The LLM-as-a-Judge and CodeBLEU metrics are strongly correlated (Pearson $r = 0.
 === Per-Repository Variation
 
 #figure(
-  image("statistics/repo_scores.png", width: 100%),
+  image("statistics/repo_scores.svg", width: 100%),
   caption: [Mean LLM scores for the top and bottom 15 repositories (minimum 20 functions). Substantial inter-repository variation exists beyond what variant or complexity alone explains.],
   placement: auto,
 ) <fig:repo-scores>
