@@ -65,6 +65,6 @@ statistics/                                     # Aggregated results and plots
 @article{cai2025comeback,
   title   = {ComeBack: Assessing LLM Decompilation for Go},
   author  = {Cai, Matthew and Bedouch, Jonah},
-  year    = {2025}
+  year    = {2026}
 }
 ```
