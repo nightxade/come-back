@@ -1,0 +1,503 @@
+@inproceedings{ref:phoenix,
+author = {Schwartz, Edward J. and Lee, JongHyup and Woo, Maverick and Brumley, David},
+title = {Native x86 decompilation using semantics-preserving structural analysis and iterative control-flow structuring},
+year = {2013},
+isbn = {9781931971034},
+publisher = {USENIX Association},
+address = {USA},
+abstract = {There are many security tools and techniques for analyzing software, but many of them require access to source code. We propose leveraging decompilation, the study of recovering abstractions from compiled code, to apply existing source-based tools and techniques to compiled programs. A decompiler should focus on two properties to be used for security. First, it should recover abstractions as much as possible to minimize the complexity that must be handled by the security analysis that follows. Second, it should aim to recover these abstractions correctly.Previous work in control-flow structuring, an abstraction recovery problem used in decompilers, does not provide either of these properties. Specifically, existing structuring algorithms are not semantics-preserving, which means that they cannot safely be used for decompilation without modification. Existing structural algorithms also miss opportunities for recovering control flow structure. We propose a new structuring algorithm in this paper that addresses these problems.We evaluate our decompiler, Phoenix, and our new structuring algorithm, on a set of 107 real world programs from GNU coreutils. Our evaluation is an order of magnitude larger than previous systematic studies of endto-end decompilers. We show that our decompiler outperforms the de facto industry standard decompiler Hex-Rays in correctness by 114\%, and recovers 30\texttimes{} more control-flow structure than existing structuring algorithms in the literature.},
+booktitle = {Proceedings of the 22nd USENIX Conference on Security},
+pages = {353–368},
+numpages = {16},
+location = {Washington, D.C.},
+series = {SEC'13}
+}
+
+@misc{ref:polytypes,
+      title={Polymorphic Type Inference for Machine Code}, 
+      author={Matthew Noonan and Alexey Loginov and David Cok},
+      year={2016},
+      eprint={1603.05495},
+      archivePrefix={arXiv},
+      primaryClass={cs.PL},
+      url={https://arxiv.org/abs/1603.05495}, 
+}
+
+@inproceedings{ref:llm4-decompile,
+   title={LLM4Decompile: Decompiling Binary Code with Large Language Models},
+   url={http://dx.doi.org/10.18653/v1/2024.emnlp-main.203},
+   DOI={10.18653/v1/2024.emnlp-main.203},
+   booktitle={Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing},
+   publisher={Association for Computational Linguistics},
+   author={Tan, Hanzhuo and Luo, Qi and Li, Jing and Zhang, Yuqun},
+   year={2024},
+   pages={3473–3487}
+}
+
+@misc{ref:ref-decompile,
+      title={ReF Decompile: Relabeling and Function Call Enhanced Decompile}, 
+      author={Yunlong Feng and Bohan Li and Xiaoming Shi and Qingfu Zhu and Wanxiang Che},
+      year={2025},
+      eprint={2502.12221},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2502.12221}, 
+}
+
+@misc{ref:context-guided-decomp,
+      title={Context-Guided Decompilation: A Step Towards Re-executability}, 
+      author={Xiaohan Wang and Yuxin Hu and Kevin Leach},
+      year={2026},
+      eprint={2511.01763},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2511.01763}, 
+}
+
+@misc{ref:idioms,
+      title={Idioms: Neural Decompilation With Joint Code and Type Definition Prediction}, 
+      author={Luke Dramko and Claire Le Goues and Edward J. Schwartz},
+      year={2025},
+      eprint={2502.04536},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2502.04536}, 
+}
+
+@misc{ref:sk2-decomp,
+      title={SK2Decompile: LLM-based Two-Phase Binary Decompilation from Skeleton to Skin}, 
+      author={Hanzhuo Tan and Weihao Li and Xiaolong Tian and Siyi Wang and Jiaming Liu and Jing Li and Yuqun Zhang},
+      year={2025},
+      eprint={2509.22114},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2509.22114}, 
+}
+
+@misc{ref:salt4-decomp,
+      title={SALT4Decompile: Inferring Source-level Abstract Logic Tree for LLM-Based Binary Decompilation}, 
+      author={Yongpan Wang and Xin Xu and Xiaojie Zhu and Xiaodong Gu and Beijun Shen},
+      year={2025},
+      eprint={2509.14646},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2509.14646}, 
+}
+
+@misc{ref:decomp-bench,
+      title={Decompile-Bench: Million-Scale Binary-Source Function Pairs for Real-World Binary Decompilation}, 
+      author={Hanzhuo Tan and Xiaolong Tian and Hanrui Qi and Jiaming Liu and Zuchen Gao and Siyi Wang and Qi Luo and Jing Li and Yuqun Zhang},
+      year={2025},
+      eprint={2505.12668},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2505.12668}, 
+}
+
+@misc{ref:decompbench,
+      title={DecompileBench: A Comprehensive Benchmark for Evaluating Decompilers in Real-World Scenarios}, 
+      author={Zeyu Gao and Yuxin Cui and Hao Wang and Siliang Qin and Yuanda Wang and Bolun Zhang and Chao Zhang},
+      year={2025},
+      eprint={2505.11340},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2505.11340}, 
+}
+
+@inproceedings{ref:exebench,
+  author = {Armengol-Estap\'{e}, Jordi and Woodruff, Jackson and Brauckmann, Alexander and Magalh\~{a}es, Jos\'{e} Wesley de Souza and O'Boyle, Michael F. P.},
+  title = {ExeBench: an ML-scale dataset of executable C functions},
+  year = {2022},
+  isbn = {9781450392730},
+  publisher = {Association for Computing Machinery},
+  address = {New York, NY, USA},
+  url = {https://doi.org/10.1145/3520312.3534867},
+  doi = {10.1145/3520312.3534867},
+  booktitle = {Proceedings of the 6th ACM SIGPLAN International Symposium on Machine Programming},
+  pages = {50–59},
+  numpages = {10},
+  keywords = {C, Code Dataset, Compilers, Machine Learning for Code, Mining Software Repositories, Program Synthesis},
+  location = {San Diego, CA, USA},
+  series = {MAPS 2022}
+}
+
+@misc{ref:wadec,
+      title={WaDec: Decompiling WebAssembly Using Large Language Model}, 
+      author={Xinyu She and Yanjie Zhao and Haoyu Wang},
+      year={2024},
+      eprint={2406.11346},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2406.11346}, 
+}
+
+@misc{ref:augmenting-smart-contract,
+      title={Augmenting Smart Contract Decompiler Output through Fine-grained Dependency Analysis and LLM-facilitated Semantic Recovery}, 
+      author={Zeqin Liao and Yuhong Nan and Zixu Gao and Henglong Liang and Sicheng Hao and Peifan Reng and Zibin Zheng},
+      year={2025},
+      eprint={2501.08670},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2501.08670}, 
+}
+
+@misc{ref:stack-sight,
+      title={StackSight: Unveiling WebAssembly through Large Language Models and Neurosymbolic Chain-of-Thought Decompilation}, 
+      author={Weike Fang and Zhejian Zhou and Junzhou He and Weihang Wang},
+      year={2024},
+      eprint={2406.04568},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2406.04568}, 
+}
+
+@misc{ref:golang,
+  title        = {The Go Programming Language},
+  author       = {{The Go Authors}},
+  year         = {2026},
+  url          = {https://golang.org},
+  note         = {Accessed: May 6, 2026}
+}
+
+@misc{ref:ghidra,
+  title        = {Ghidra Software Reverse Engineering Framework},
+  author       = {{National Security Agency}},
+  year         = {2019},
+  url          = {https://github.com/NationalSecurityAgency/ghidra},
+  note         = {Accessed: May 6, 2026}
+}
+
+@misc{ref:idapro,
+  title        = {{IDA Pro} Disassembler and Debugger},
+  author       = {{Hex-Rays}},
+  url          = {https://hex-rays.com/ida-pro},
+  note         = {Accessed: May 6, 2026}
+}
+
+@inproceedings{ref:java-quirks,
+   title={The Strengths and Behavioral Quirks of Java Bytecode Decompilers},
+   url={http://dx.doi.org/10.1109/scam.2019.00019},
+   DOI={10.1109/scam.2019.00019},
+   booktitle={2019 19th International Working Conference on Source Code Analysis and Manipulation (SCAM)},
+   publisher={IEEE},
+   author={Harrand, Nicolas and Soto-Valero, Cesar and Monperrus, Martin and Baudry, Benoit},
+   year={2019},
+   month={Sept}, pages={92–102} }
+
+@misc{ref:claude-code,
+	author = {{Anthropic}},
+	title = {{C}laude {C}ode | {A}nthropic's agentic coding system},
+	url = {https://www.anthropic.com/product/claude-code},
+	year = {2025},
+}
+
+@misc{ref:codex,
+      title={Evaluating Large Language Models Trained on Code}, 
+      author={Mark Chen and Jerry Tworek and Heewoo Jun and Qiming Yuan and Henrique Ponde de Oliveira Pinto and Jared Kaplan and Harri Edwards and Yuri Burda and Nicholas Joseph and Greg Brockman and Alex Ray and Raul Puri and Gretchen Krueger and Michael Petrov and Heidy Khlaaf and Girish Sastry and Pamela Mishkin and Brooke Chan and Scott Gray and Nick Ryder and Mikhail Pavlov and Alethea Power and Lukasz Kaiser and Mohammad Bavarian and Clemens Winter and Philippe Tillet and Felipe Petroski Such and Dave Cummings and Matthias Plappert and Fotios Chantzis and Elizabeth Barnes and Ariel Herbert-Voss and William Hebgen Guss and Alex Nichol and Alex Paino and Nikolas Tezak and Jie Tang and Igor Babuschkin and Suchir Balaji and Shantanu Jain and William Saunders and Christopher Hesse and Andrew N. Carr and Jan Leike and Josh Achiam and Vedant Misra and Evan Morikawa and Alec Radford and Matthew Knight and Miles Brundage and Mira Murati and Katie Mayer and Peter Welinder and Bob McGrew and Dario Amodei and Sam McCandlish and Ilya Sutskever and Wojciech Zaremba},
+      year={2021},
+      eprint={2107.03374},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2107.03374}, 
+}
+
+@misc{ref:geminicli,
+  author={Google},
+  url={https://blog.google/innovation-and-ai/technology/developers-tools/introducing-gemini-cli-open-source-ai-agent/},
+  title={Gemini CLI: your open-source AI agent},
+  year={2025},
+}
+
+@misc{ref:swe-bench,
+      title={SWE-bench: Can Language Models Resolve Real-World GitHub Issues?}, 
+      author={Carlos E. Jimenez and John Yang and Alexander Wettig and Shunyu Yao and Kexin Pei and Ofir Press and Karthik Narasimhan},
+      year={2024},
+      eprint={2310.06770},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2310.06770}, 
+}
+
+@misc{ref:terminal-bench,
+      title={Terminal-Bench: Benchmarking Agents on Hard, Realistic Tasks in Command Line Interfaces}, 
+      author={Mike A. Merrill and Alexander G. Shaw and Nicholas Carlini and Boxuan Li and Harsh Raj and Ivan Bercovich and Lin Shi and Jeong Yeon Shin and Thomas Walshe and E. Kelly Buchanan and Junhong Shen and Guanghao Ye and Haowei Lin and Jason Poulos and Maoyu Wang and Marianna Nezhurina and Jenia Jitsev and Di Lu and Orfeas Menis Mastromichalakis and Zhiwei Xu and Zizhao Chen and Yue Liu and Robert Zhang and Leon Liangyu Chen and Anurag Kashyap and Jan-Lucas Uslu and Jeffrey Li and Jianbo Wu and Minghao Yan and Song Bian and Vedang Sharma and Ke Sun and Steven Dillmann and Akshay Anand and Andrew Lanpouthakoun and Bardia Koopah and Changran Hu and Etash Guha and Gabriel H. S. Dreiman and Jiacheng Zhu and Karl Krauth and Li Zhong and Niklas Muennighoff and Robert Amanfu and Shangyin Tan and Shreyas Pimpalgaonkar and Tushar Aggarwal and Xiangning Lin and Xin Lan and Xuandong Zhao and Yiqing Liang and Yuanli Wang and Zilong Wang and Changzhi Zhou and David Heineman and Hange Liu and Harsh Trivedi and John Yang and Junhong Lin and Manish Shetty and Michael Yang and Nabil Omi and Negin Raoof and Shanda Li and Terry Yue Zhuo and Wuwei Lin and Yiwei Dai and Yuxin Wang and Wenhao Chai and Shang Zhou and Dariush Wahdany and Ziyu She and Jiaming Hu and Zhikang Dong and Yuxuan Zhu and Sasha Cui and Ahson Saiyed and Arinbjörn Kolbeinsson and Jesse Hu and Christopher Michael Rytting and Ryan Marten and Yixin Wang and Alex Dimakis and Andy Konwinski and Ludwig Schmidt},
+      year={2026},
+      eprint={2601.11868},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2601.11868}, 
+}
+
+@comment{cough gotta give myself a free citation (i promise its actually relevant)}
+@misc{ref:cybergym,
+      title={CyberGym: Evaluating AI Agents' Real-World Cybersecurity Capabilities at Scale}, 
+      author={Zhun Wang and Tianneng Shi and Jingxuan He and Matthew Cai and Jialin Zhang and Dawn Song},
+      year={2026},
+      eprint={2506.02548},
+      archivePrefix={arXiv},
+      primaryClass={cs.CR},
+      url={https://arxiv.org/abs/2506.02548}, 
+} 
+
+@misc{ref:gostrings,
+  title={Golang Reverse Engineering Tips},
+  url={https://www.travismathison.com/posts/Golang-Reverse-Engineering-Tips/},
+  year={2023},
+  author={Travis Mathison},
+}
+
+@misc{ref:idastrings,
+  title={Yet Another Golang binary parser for IDAPro},
+  url={https://github.com/0xjiayu/go_parser},
+  year={2020},
+  author={0xjiayu},
+}
+
+@misc{ref:lora,
+      title={LoRA: Low-Rank Adaptation of Large Language Models}, 
+      author={Edward J. Hu and Yelong Shen and Phillip Wallis and Zeyuan Allen-Zhu and Yuanzhi Li and Shean Wang and Lu Wang and Weizhu Chen},
+      year={2021},
+      eprint={2106.09685},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2106.09685}, 
+}
+
+@misc{ref:githubapi,
+  title={Github Search API},
+  author={Github},
+  year={2026},
+  url={https://docs.github.com/en/rest/search?apiVersion=2026-03-10},
+}
+
+@misc{ref:goresym,
+  title={GoReSym},
+  author={Mandiant},
+  year={2022},
+  url={https://github.com/mandiant/GoReSym},
+}
+
+@misc{ref:lumina,
+  title={Private Lumina},
+  author={Hex-Rays},
+  url={https://hex-rays.com/lumina},
+}
+
+@misc{ref:mlm,
+  title={MLM},
+  author={AscendGrace},
+  url={https://mlm01.com/index},
+}
+
+@misc{ref:codebleu,
+      title={CodeBLEU: a Method for Automatic Evaluation of Code Synthesis}, 
+      author={Shuo Ren and Daya Guo and Shuai Lu and Long Zhou and Shujie Liu and Duyu Tang and Neel Sundaresan and Ming Zhou and Ambrosio Blanco and Shuai Ma},
+      year={2020},
+      eprint={2009.10297},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2009.10297}, 
+}
+
+@misc{ref:llm-as-a-judge,
+      title={A Survey on LLM-as-a-Judge}, 
+      author={Jiawei Gu and Xuhui Jiang and Zhichao Shi and Hexiang Tan and Xuehao Zhai and Chengjin Xu and Wei Li and Yinghan Shen and Shengjie Ma and Honghao Liu and Saizhuo Wang and Kun Zhang and Yuanzhuo Wang and Wen Gao and Lionel Ni and Jian Guo},
+      year={2025},
+      eprint={2411.15594},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2411.15594}, 
+}
+
+@misc{ref:tree-sitter,
+  title={Go Tree-sitter},
+  author={tree-sitter},
+  url={https://github.com/tree-sitter/tree-sitter},
+}
+
+@inproceedings{ref:btc,
+  series={BAR 2022},
+  title={Beyond the C: Retargetable Decompilation using Neural Machine Translation},
+  url={http://dx.doi.org/10.14722/bar.2022.23009},
+  DOI={10.14722/bar.2022.23009},
+  booktitle={Proceedings 2022 Workshop on Binary Analysis Research},
+  publisher={Internet Society},
+  author={Hosseini, Iman and Dolan-Gavitt, Brendan},
+  year={2022},
+  collection={BAR 2022}
+}
+
+@misc{ref:decgpt,
+      title={Refining Decompiled C Code with Large Language Models}, 
+      author={Wai Kin Wong and Huaijin Wang and Zongjie Li and Zhibo Liu and Shuai Wang and Qiyi Tang and Sen Nie and Shi Wu},
+      year={2023},
+      eprint={2310.06530},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2310.06530}, 
+}
+
+@misc{ref:decompiling-rust,
+      title={Decompiling Rust: An Empirical Study of Compiler Optimizations and Reverse Engineering Challenges}, 
+      author={Zixu Zhou},
+      year={2025},
+      eprint={2507.18792},
+      archivePrefix={arXiv},
+      primaryClass={cs.PL},
+      url={https://arxiv.org/abs/2507.18792}, 
+}
+
+@misc{ref:rust-binary-analysis,
+  title={Rust Binary Analysis, Feature by Feature},
+  author={Check Point Research},
+  url={https://research.checkpoint.com/2023/rust-binary-analysis-feature-by-feature/},
+  year={2023},
+}
+
+@misc{ref:reversing-swift,
+  title={Reversing Swift},
+  author={doronz88},
+  url={https://github.com/doronz88/swift_reversing},
+}
+
+@inproceedings{ref:swift-rev,
+  author = {Kraus, Malte and Haupert, Vincent},
+  title = {The Swift Language from a Reverse Engineering Perspective},
+  year = {2018},
+  isbn = {9781450361712},
+  publisher = {Association for Computing Machinery},
+  address = {New York, NY, USA},
+  url = {https://doi.org/10.1145/3289595.3289599},
+  doi = {10.1145/3289595.3289599},
+  booktitle = {Proceedings of the 2nd Reversing and Offensive-Oriented Trends Symposium},
+  articleno = {4},
+  numpages = {12},
+  keywords = {iOS, dynamic analysis, Swift, Software Reverse Engineering, Frida},
+  location = {Vienna, Austria},
+  series = {ROOTS '18}
+}
+
+@misc{ref:reversing-go,
+  title={Reverse Engineering Golang},
+  author={0xdevalias},
+  url={https://gist.github.com/0xdevalias/4e430914124c3fd2c51cb7ac2801acba},
+}
+
+@misc{ref:goretk,
+  title={Go Reverse Engineering Tool Kit},
+  author={goretk},
+  url={https://github.com/goretk}
+}
+
+@misc{ref:alphagolang,
+  title={AlphaGolang},
+  author={Sentinel Labs},
+  url={https://github.com/SentineLabs/AlphaGolang},
+}
+
+@misc{ref:idagolanghelper,
+  title={IDAGolangHelper},
+  author={sibears},
+  url={https://github.com/sibears/IDAGolangHelper}
+}
+
+@misc{ref:binary-ninja,
+  title={Binary Ninja},
+  author={Vector35},
+  url={https://binary.ninja/}
+}
+
+@mastersthesis{ref:program-semantics-go,
+  title={Reconstructing Program Semantics
+from Go Binaries},
+  author={Alexis Engelke},
+  year={2017},
+  url={https://home.cit.tum.de/~engelke/pubs/1709-ma.pdf},
+}
+
+@misc{ref:humaneval,
+      title={Evaluating Large Language Models Trained on Code}, 
+      author={Mark Chen and Jerry Tworek and Heewoo Jun and Qiming Yuan and Henrique Ponde de Oliveira Pinto and Jared Kaplan and Harri Edwards and Yuri Burda and Nicholas Joseph and Greg Brockman and Alex Ray and Raul Puri and Gretchen Krueger and Michael Petrov and Heidy Khlaaf and Girish Sastry and Pamela Mishkin and Brooke Chan and Scott Gray and Nick Ryder and Mikhail Pavlov and Alethea Power and Lukasz Kaiser and Mohammad Bavarian and Clemens Winter and Philippe Tillet and Felipe Petroski Such and Dave Cummings and Matthias Plappert and Fotios Chantzis and Elizabeth Barnes and Ariel Herbert-Voss and William Hebgen Guss and Alex Nichol and Alex Paino and Nikolas Tezak and Jie Tang and Igor Babuschkin and Suchir Balaji and Shantanu Jain and William Saunders and Christopher Hesse and Andrew N. Carr and Jan Leike and Josh Achiam and Vedant Misra and Evan Morikawa and Alec Radford and Matthew Knight and Miles Brundage and Mira Murati and Katie Mayer and Peter Welinder and Bob McGrew and Dario Amodei and Sam McCandlish and Ilya Sutskever and Wojciech Zaremba},
+      year={2021},
+      eprint={2107.03374},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2107.03374}, 
+}
+
+@misc{ref:gowiki,
+  title={Go Wiki},
+  url={https://go.dev/wiki/},
+}
+
+@misc{ref:pan-go-malware,
+  title={The Gopher in the Room: Analysis of GoLang Malware in the Wild},
+  url={https://unit42.paloaltonetworks.com/the-gopher-in-the-room-analysis-of-golang-malware-in-the-wild/},
+  author={Unit 42, Palo Alto Networks},
+  year={2019},
+}
+
+@misc{ref:crowdstrike-go-malware,
+  title={Golang Malware Is More than a Fad: Financial Motivation Drives Adoption},
+  url={https://www.crowdstrike.com/en-us/blog/financial-motivation-drives-golang-malware-adoption/},
+  author={Crowdstrike},
+  year={2021},
+}
+
+@misc{ref:gobfuscate,
+  title={gobfuscate},
+  url={https://github.com/unixpickle/gobfuscate},
+  author={unixpickle},
+}
+
+@misc{ref:go-cloud,
+  title={Go for Cloud & Network Services},
+  url={https://go.dev/solutions/cloud},
+  author={Go},
+}
+
+@misc{ref:in-context-learning,
+      title={A Survey on In-context Learning}, 
+      author={Qingxiu Dong and Lei Li and Damai Dai and Ce Zheng and Jingyuan Ma and Rui Li and Heming Xia and Jingjing Xu and Zhiyong Wu and Tianyu Liu and Baobao Chang and Xu Sun and Lei Li and Zhifang Sui},
+      year={2024},
+      eprint={2301.00234},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2301.00234}, 
+}
+
+@misc{ref:dec-llm,
+  author = {Wong, Wai Kin and Wu, Daoyuan and Wang, Huaijin and Li, Zongjie and Liu, Zhibo and Wang, Shuai and Tang, Qiyi and Nie, Sen and Wu, Shi},
+  title = {DecLLM: LLM-Augmented Recompilable Decompilation for Enabling Programmatic Use of Decompiled Code},
+  year = {2025},
+  issue_date = {July 2025},
+  publisher = {Association for Computing Machinery},
+  address = {New York, NY, USA},
+  volume = {2},
+  number = {ISSTA},
+  url = {https://doi.org/10.1145/3728958},
+  doi = {10.1145/3728958},
+  journal = {Proc. ACM Softw. Eng.},
+  month = jun,
+  articleno = {ISSTA081},
+  numpages = {24},
+  keywords = {Large Language Model, Recompilable Decompilation, Reverse Engineering}
+}
+
+@misc{ref:ida-9.2-golang,
+  title={Stop Guessing and Start GOing: Cleaner Golang Decompilation in IDA 9.2},
+  author={Hex-Rays},
+  url={https://hex-rays.com/blog/stop-guessing-and-start-going},
+  year={2025},
+}
+
+@article{ref:wilcoxon,
+  title={Individual comparisons by ranking methods},
+  author={Wilcoxon, Frank},
+  journal={Biometrics bulletin},
+  volume={1},
+  number={6},
+  pages={80--83},
+  year={1945},
+  publisher={JSTOR}
+}
