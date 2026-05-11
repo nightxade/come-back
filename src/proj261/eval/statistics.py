@@ -678,7 +678,7 @@ def _plot_repo_scores(df: pd.DataFrame, out: Path, top_n: int = 15):
     # Shorten repo names (owner/repo)
     labels = [r.split("/")[-1] if "/" in r else r for r in selected.index]
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, max(5, n * 0.4)), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, max(6, n * 0.6)), sharey=True)
 
     y = np.arange(len(selected))
 
@@ -686,7 +686,7 @@ def _plot_repo_scores(df: pd.DataFrame, out: Path, top_n: int = 15):
     colors = ["#e74c3c" if i < n else "#2ecc71" for i in range(len(selected))]
     axes[0].barh(y, selected["llm_mean"], color=colors, edgecolor="white", linewidth=0.5)
     axes[0].set_yticks(y)
-    axes[0].set_yticklabels(labels, fontsize=8)
+    axes[0].set_yticklabels(labels, fontsize=12)
     axes[0].set_xlabel("Mean LLM Score")
     axes[0].set_title("LLM-as-a-Judge")
     axes[0].set_xlim(0, 1)
@@ -793,19 +793,19 @@ def main():
     # Generate plots
     _setup_style()
     print("Generating plots...")
-    _plot_variant_scores(df, STATS_DIR / "variant_scores.png")
-    _plot_score_distributions(df, STATS_DIR / "score_distributions.png")
+    _plot_variant_scores(df, STATS_DIR / "variant_scores.svg")
+    _plot_score_distributions(df, STATS_DIR / "score_distributions.svg")
     _plot_ast_vs_score(df, SIZE_BINS, "ast_node_count", "AST Node Count",
-                       STATS_DIR / "ast_size_vs_score.png")
+                       STATS_DIR / "ast_size_vs_score.svg")
     _plot_ast_vs_score(df, DEPTH_BINS, "ast_depth", "AST Depth",
-                       STATS_DIR / "ast_depth_vs_score.png")
-    _plot_metric_correlation(df, STATS_DIR / "metric_correlation.png")
-    _plot_source_len_vs_score(df, STATS_DIR / "source_len_vs_score.png")
-    _plot_score_cdfs(df, STATS_DIR / "score_cdfs.png")
-    _plot_codebleu_submetrics(df, STATS_DIR / "codebleu_submetrics.png")
-    _plot_paired_diffs(df, STATS_DIR / "paired_diffs.png")
-    _plot_variant_scores_weighted(df, STATS_DIR / "variant_scores_weighted.png")
-    _plot_repo_scores(df, STATS_DIR / "repo_scores.png")
+                       STATS_DIR / "ast_depth_vs_score.svg")
+    _plot_metric_correlation(df, STATS_DIR / "metric_correlation.svg")
+    _plot_source_len_vs_score(df, STATS_DIR / "source_len_vs_score.svg")
+    _plot_score_cdfs(df, STATS_DIR / "score_cdfs.svg")
+    _plot_codebleu_submetrics(df, STATS_DIR / "codebleu_submetrics.svg")
+    _plot_paired_diffs(df, STATS_DIR / "paired_diffs.svg")
+    _plot_variant_scores_weighted(df, STATS_DIR / "variant_scores_weighted.svg")
+    _plot_repo_scores(df, STATS_DIR / "repo_scores.svg")
 
     print("\nDone. All output in statistics/")
 

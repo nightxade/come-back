@@ -45,17 +45,27 @@ out/
 │       └── {package}/{function}.go  # Per-function recovered Go source
 └── results/{metric}/{owner__repo}/{variant}/{binary}.json  # Evaluation results
 
-statistics/
-├── summary.txt              # Full text summary (sections A–F)
-├── variant_scores.png       # Mean scores by variant (llm, codebleu)
-├── score_distributions.png  # Box plots per metric and variant
-├── ast_size_vs_score.png    # Score vs AST node count bins
-├── ast_depth_vs_score.png   # Score vs AST depth bins
-├── metric_correlation.png   # LLM vs CodeBLEU hex-bin scatter
-├── source_len_vs_score.png  # Source length vs score per metric
-├── score_cdfs.png           # CDF of scores per variant and metric
-├── codebleu_submetrics.png  # CodeBLEU sub-component breakdown by variant
-└── paired_diffs.png         # Paired score difference histograms (default vs stripped)
+paper/
+├── assets/
+│   ├── pipeline.typ                   # Raw typst for pipeline diagram of the project
+│   ├── pipeline_diagram.png           # LLM generated png for pipeline diagram of the project
+│   ├── string-recovery.typ            # Raw typst for string recovery steps figure
+│   └── string_recovery_examples.png   # LLM generated png for sting recovery steps
+├── statistics/
+│   ├── summary.txt                    # Full text summary (sections A–F)
+│   ├── variant_scores.svg             # Mean scores by variant (llm, codebleu)
+│   ├── variant_scores_weighted.svg    # Source-length-weighted mean scores by variant
+│   ├── score_distributions.svg        # Box plots per metric and variant
+│   ├── ast_size_vs_score.svg          # Score vs AST node count bins
+│   ├── ast_depth_vs_score.svg         # Score vs AST depth bins
+│   ├── metric_correlation.svg         # LLM vs CodeBLEU hex-bin scatter
+│   ├── source_len_vs_score.svg        # Source length vs score per metric
+│   ├── score_cdfs.svg                 # CDF of scores per variant and metric
+│   ├── codebleu_submetrics.svg        # CodeBLEU sub-component breakdown by variant
+│   ├── paired_diffs.svg               # Paired score difference histograms (default vs stripped)
+│   └── repo_scores.svg                # Top and bottom repos by mean LLM / CodeBLEU score
+├── main.typ                           # Typst source for the paper
+└── refs.bib                           # Bibliography
 ```
 
 Build variants: `default`, `debug` (`-gcflags=-N -l`), `stripped` (`-ldflags=-s -w`).
@@ -244,6 +254,7 @@ uv run compare --metric example --force   # re-evaluate existing results
 | `--max-repos` | Limit number of repos |
 | `--max-binaries` | Limit total number of binaries to process |
 | `--force` | Re-evaluate even if results exist |
+| `--concurrency` | Max concurrent evaluations for synchronous mode (default: 32) |
 
 **Writing a custom metric.** Create a module at `src/proj261/eval/comparisons/<name>.py` that defines:
 
@@ -334,16 +345,18 @@ The text summary (`statistics/summary.txt`) contains six sections:
 - **E. Metric correlations** — Pearson and Spearman correlations between llm and codebleu scores, and between source length / AST node count and each metric score.
 - **F. Syntax validity** — Valid/invalid counts and rates per variant and overall.
 
-Plots (all saved as PNG):
+Plots (all saved as SVG):
 
-- `variant_scores.png` — Grouped bar chart of mean scores by variant with ±1 std error bars (llm, codebleu).
-- `score_distributions.png` — Box plots per metric, with variants as x-axis categories.
-- `ast_size_vs_score.png` / `ast_depth_vs_score.png` — Line plots showing how scores degrade with AST complexity.
-- `metric_correlation.png` — Hex-bin scatter of llm vs codebleu scores with Pearson r annotation.
-- `source_len_vs_score.png` — Hex-bin scatter of source length vs score per metric (log-scale x-axis).
-- `score_cdfs.png` — Cumulative distribution of scores per variant for each metric.
-- `codebleu_submetrics.png` — Grouped bar chart of CodeBLEU's four sub-components (ngram, weighted ngram, syntax match, dataflow) per variant.
-- `paired_diffs.png` — Histograms of paired score differences (default − stripped) for each metric, with mean and zero reference lines.
+- `variant_scores.svg` — Grouped bar chart of mean scores by variant with ±1 std error bars (llm, codebleu).
+- `variant_scores_weighted.svg` — Grouped bar chart of source-length-weighted mean scores by variant (llm, codebleu).
+- `score_distributions.svg` — Box plots per metric, with variants as x-axis categories.
+- `ast_size_vs_score.svg` / `ast_depth_vs_score.svg` — Line plots showing how scores degrade with AST complexity.
+- `metric_correlation.svg` — Hex-bin scatter of llm vs codebleu scores with Pearson r annotation.
+- `source_len_vs_score.svg` — Hex-bin scatter of source length vs score per metric (log-scale x-axis).
+- `score_cdfs.svg` — Cumulative distribution of scores per variant for each metric.
+- `codebleu_submetrics.svg` — Grouped bar chart of CodeBLEU's four sub-components (ngram, weighted ngram, syntax match, dataflow) per variant.
+- `paired_diffs.svg` — Histograms of paired score differences (default − stripped) for each metric, with mean and zero reference lines.
+- `repo_scores.svg` — Horizontal bar chart of top and bottom repositories by mean LLM and CodeBLEU score.
 
 ### Utilities
 
@@ -352,6 +365,12 @@ Plots (all saved as PNG):
 ```bash
 uv run count-tokens data/decomps/ollama__ollama/default/chat.c
 uv run count-tokens data/binaries/ollama__ollama/default/chat --model gemini-2.0-flash-lite
+```
+
+**Rebuild pending batches** — Reconstructs `pending_batches.json` from a JSON list of already-submitted Gemini batch job names. Useful for crash recovery when `infer` submitted batch jobs but crashed before saving the tracking file.
+
+```bash
+uv run rebuild-pending
 ```
 
 [^1]: **GoReSym symbol recovery.** GoReSym now runs on **all variants** (default, debug, stripped), not just stripped binaries. Go's `pclntab` (program counter line table) survives even in stripped binaries because the runtime needs it. GoReSym parses `pclntab` to recover function names and boundaries, which are injected into Ghidra before auto-analysis. This restores real Go symbol names (e.g. `github.com/ollama/ollama/api.Func` instead of `FUN_004a1000`), enabling the downstream filter and chunk pipeline to classify them by module path. Running GoReSym on unstripped binaries is also valuable because Ghidra sometimes misses user functions that GoReSym recovers from `pclntab`. If GoReSym is not installed, the decompiler degrades gracefully and continues with Ghidra's default `FUN_` names. Note: Ghidra's decompilation of stripped Go binaries is still limited — in our testing it produced output for only ~55% of functions compared to unstripped builds, even with correct boundaries from GoReSym. The bottleneck is Ghidra's decompiler (lacking type info), not symbol recovery.
