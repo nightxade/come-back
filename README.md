@@ -1,4 +1,4 @@
-# ComeBack
+# ComeBack: Assessing LLM Decompilation for Go
 
 **ComeBack** is a refinement-based LLM decompilation pipeline that recovers Go source code from compiled binaries. It decompiles Go binaries with Ghidra, applies custom string recovery heuristics, and prompts a large language model (Gemini) to reconstruct the original Go source on a per-function basis. The repository also includes a large-scale benchmark of 128 popular open-source Go projects (1,665 binaries, ~1.8M function-level evaluations) and an evaluation suite measuring CodeBLEU, LLM-as-a-Judge semantic similarity, and syntax validity.
 
